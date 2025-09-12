@@ -1,0 +1,27 @@
+# 테스트 파라미터
+'''
+터미널 실행 후 루트 폴더 안에서 실행
+
+python 파일명.py `
+ --input 'images/파일명.jpg' `
+ --outdir 'outputs' `
+ --model-id '모델명'
+
+모델명 생략 시 depth-anything V2 Large 기본값
+※ 주의 : 여러 라인으로 파라미터를 입력하기 위해 백틱(`)을 사용함. 마지막 라인에는 사용하지 않음.
+'''
+#-----------------------------------------------------------------------------------------------
+# 예시
+python main.py `
+ --input 'images/대나무와_학.jpg' `
+ --outdir 'outputs'
+
+python main.py `
+ --input 'images/대나무와_학.jpg' `
+ --outdir 'outputs' `
+ --model-id 'Intel/dpt-hybrid-midas'
+
+python main.py `
+ --input 'images/대나무와_학.jpg' `
+ --outdir 'outputs' `
+ --model-id 'Intel/dpt-large'

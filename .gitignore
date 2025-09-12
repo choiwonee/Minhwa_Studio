@@ -1,0 +1,30 @@
+# Python 캐시/컴파일 파일 무시
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# 출력 결과물 폴더 무시
+outputs/
+
+# VS Code 환경 설정 무시
+.vscode/
+*.code-workspace
+
+# 가상환경 폴더 무시
+env/
+venv/
+ENV/
+.venv/
+
+# Jupyter Notebook 체크포인트
+.ipynb_checkpoints/
+
+# Python 패키지/빌드 파일
+*.egg-info/
+dist/
+build/
+
+# OS 파일 무시
+.DS_Store
+Thumbs.db
