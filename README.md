@@ -16,7 +16,8 @@
 | 딥러닝 모델       | (모델 테스트 중)                           |
 | 영상처리 라이브러리 | OpenCV 4.12.0.88, Pillow 11.3.0          |
 | 보조 라이브러리   | Transformers 4.56.1, Accelerate 1.10.1   |
-※ Python은 반드시 3.11.0 이하 버전으로 설치해야 합니다.
+
+**※ Python은 반드시 3.11.0 이하 버전으로 설치해야 합니다.**
 (2025.09 기준 3.11.0 이상 버전은 타 라이브러리들과 호환 및 안정성이 낮습니다.)
 
 
@@ -25,7 +26,7 @@
 pip install opencv-python pillow numpy transformers accelerate tqdm
 pip install torch torchvision
 ```
-실행 방법은 Minhwa2_5D/example/test_params.txt 참조
+자세한 실행 방법은 **Minhwa2_5D/example/test_params.txt** 참조
 
 
 ## 📁 프로젝트 구조
