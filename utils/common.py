@@ -9,11 +9,12 @@ outDir = None
 
 MODEL_SHORT_NAMES = {
     "depth-anything/Depth-Anything-V2-Large-hf": "DAv2L",
-    "depth-anything/Depth-Anything-V2-Small-hf": "DAv2S",
-    "Intel/dpt-hybrid-midas": "DPTm",
-    "Intel/dpt-large": "DPTL",
-    "Intel/zoedepth-nyu": "ZoeNYU",
-    "Intel/zoedepth-kitti": "ZoeKITTI"
+    "prs-eth/marigold-depth-hr-v1-1": "MGHR1",
+    "Intel/dpt-hybrid-midas": "DPT_M",
+    "Intel/dpt-large": "DPT_L",
+    "Intel/zoedepth-nyu": "Zoe_NYU",
+    "Intel/zoedepth-nyu-kitti": "Zoe_NK",
+    "Intel/zoedepth-kitti": "Zoe_K"
 }
 
 def generateDepthMapFilename(model_id: str, input_path: str | Path) -> str:
@@ -34,7 +35,7 @@ def loadImageNumpy(path: str | Path, scale=1.0) -> np.ndarray:
     img = Image.open(path).convert("RGB")
     if scale != 1.0:
         w, h = img.size
-        img  = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        img  = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
     return np.array(img)
 
 
