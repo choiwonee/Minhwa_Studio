@@ -15,7 +15,7 @@
 | 딥러닝 프레임워크 | PyTorch 2.8.0                             |
 | 딥러닝 모델       | (모델 테스트 중)                           |
 | 영상처리 라이브러리 | OpenCV 4.12.0.88, Pillow 11.3.0          |
-| 보조 라이브러리   | Transformers 4.56.1, Accelerate 1.10.1   |
+| 보조 라이브러리   | Transformers 4.56.1                       |
 
 **※ Python은 반드시 3.11.0 이하 버전으로 설치해야 합니다.**
 
@@ -24,9 +24,13 @@
 
 ## ▶️ 사용 방법
 ```bash
-pip install opencv-python pillow numpy transformers accelerate tqdm
-pip install torch torchvision
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install transformers diffusers huggingface-hub
+pip install pillow numpy scipy
+pip install hf-xet opencv-python
 ```
+--index-url https://download.pytorch.org/whl/cu121 은 cuda 사용 시 필요합니다.
+
 자세한 실행 방법은 **Minhwa2_5D/example/test_params.txt** 참조
 
 
