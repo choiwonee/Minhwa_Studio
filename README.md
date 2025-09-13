@@ -1,0 +1,44 @@
+<h1 align="center">Minhwa 2.5D Maker</h1>
+<p align="center">2025학년도 2학기 캡스톤디자인 졸업작품 프로젝트 (4인)</p>
+
+## 📖 프로젝트 개요
+본 프로젝트는 딥러닝 기반의 깊이 추정 모델 및 이미지 합성 모델, 컴퓨터 비전 기술을 활용하여 우리나라 전통 민화를 2.5D 이미지로 변환하고 새로운 이미지를 합성하는 것을 주요 목표로 합니다. 단순 평면 이미지를 입체적으로 구현하는 기술적 도전에 대한 흥미에서 아이디어를 얻었으며, 우리나라 전통 민화에 생동감을 부여하고자 하는 비전을 실현하기 위해 해당 주제를 선정하게 되었습니다.
+
+
+## 🚀 주요 기능
+
+
+## 🔧 기술 스택
+| 구분              | 기술                                      |
+|:-----------------:|:----------------------------------------:|
+| 개발 환경         | Python 3.11.0                             |
+| 딥러닝 프레임워크 | PyTorch 2.8.0                             |
+| 딥러닝 모델       | (모델 테스트 중)                           |
+| 영상처리 라이브러리 | OpenCV 4.12.0.88, Pillow 11.3.0          |
+| 보조 라이브러리   | Transformers 4.56.1                       |
+
+**※ Python은 반드시 3.11.0 이하 버전으로 설치해야 합니다.**
+
+(2025.09 기준 3.11.0 이상 버전은 타 라이브러리들과 호환 및 안정성이 낮습니다.)
+
+
+## ▶️ 사용 방법
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install transformers diffusers huggingface-hub
+pip install pillow numpy scipy
+pip install hf-xet opencv-python
+```
+--index-url https://download.pytorch.org/whl/cu121 은 cuda 사용 시 필요합니다.
+
+자세한 실행 방법은 **Minhwa2_5D/example/test_params.txt** 참조
+
+
+## 📁 프로젝트 구조
+
+
+## 📢 팀 소개
+
+
+## 📜 라이선스
+
