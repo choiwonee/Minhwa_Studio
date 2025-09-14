@@ -9,7 +9,9 @@ outDir = None
 
 MODEL_SHORT_NAMES = {
     "depth-anything/Depth-Anything-V2-Large-hf": "DAv2L",
-    "prs-eth/marigold-depth-hr-v1-1": "MGHR1",
+    "prs-eth/marigold-depth-hr-v1-1": "MGHR",
+    "prs-eth/marigold-depth-v1-1": "MGv1",
+    "prs-eth/marigold-depth-v1-0": "MGv0",
     "Intel/dpt-hybrid-midas": "DPT_M",
     "Intel/dpt-large": "DPT_L",
     "Intel/zoedepth-nyu": "Zoe_NYU",
