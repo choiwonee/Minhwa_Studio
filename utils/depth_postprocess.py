@@ -40,6 +40,7 @@ def enhance_depth_edges(depth01: np.ndarray, strength: float = 0.4) -> np.ndarra
     return COM.normalize_np_img_array(out)
 
 
+<<<<<<< HEAD
 def depth_to_normal(depth01: np.ndarray,
                     normal_scale: float = 50.0,
                     alpha: float = 0.7,    # Gradient 가중치
@@ -89,4 +90,101 @@ def depth_to_normal(depth01: np.ndarray,
 
     # --- (4) 결과 반환 ---
     return normal_final
+=======
+# def depth_to_normal(depth01: np.ndarray,
+#                     normal_scale: float = 50.0,
+#                     sigma: float = 1.0,
+#                     bilateral: bool = True,
+#                     d: int = 9,
+#                     sigmaColor: float = 0.1,
+#                     sigmaSpace: float = 5.0) -> np.ndarray:
+#     """
+#     깊이맵(0~1 범위 float32)을 노멀맵(RGB 이미지)으로 변환하는 함수
+#     """
+
+#     # --- (1) 깊이맵 필터링 (노이즈 제거) ---
+#     if bilateral:
+#         # Bilateral Filter: 경계(Edge)는 유지하면서 노이즈 제거
+#         depth_filtered = cv2.bilateralFilter(
+#             depth01.astype(np.float32),
+#             d=d,
+#             sigmaColor=sigmaColor * 255.0,
+#             sigmaSpace=sigmaSpace
+#         )
+#     else:
+#         # Gaussian Blur: 전체적으로 부드럽게 흐림
+#         depth_filtered = cv2.GaussianBlur(depth01, (0, 0), sigma)
+
+#     # --- (2) 깊이맵 기울기 계산 ---
+#     # gx: 가로(x) 방향 변화율, gy: 세로(y) 방향 변화율
+#     gy, gx = np.gradient(depth_filtered)
+
+#     # --- (3) 법선 벡터(nx, ny, nz) 계산 ---
+#     nz = np.ones_like(depth_filtered)        # z방향 성분 (항상 1로 둠 → 카메라 방향)
+#     nx = -gx * normal_scale                  # x방향 성분 (음수: 기울기 반전)
+#     ny = -gy * normal_scale                  # y방향 성분 (음수: 기울기 반전)
+
+#     # --- (4) 벡터 정규화 (길이=1로 맞추기) ---
+#     norm = np.sqrt(nx * nx + ny * ny + nz * nz) + 1e-9
+#     nx /= norm
+#     ny /= norm
+#     nz /= norm
+
+#     # --- (5) [-1, 1] → [0, 1] 범위로 변환 ---
+#     # RGB로 매핑: (nx, ny, nz) → (R, G, B)
+#     normal = np.stack([
+#         (nx + 1) * 0.5,
+#         (ny + 1) * 0.5,
+#         (nz + 1) * 0.5
+#     ], axis=-1)
+
+#     # --- (6) 결과 반환 ---
+#     # 0~1 범위 클리핑, float32 타입 유지
+#     return np.clip(normal.astype(np.float32), 0.0, 1.0)
+
+
+def depth_to_normal(depth01: np.ndarray,
+                    normal_scale: float = 50.0) -> np.ndarray:
+    """
+    깊이맵(0~1 범위 float32)을 노멀맵(RGB 이미지)으로 변환하는 함수.
+    
+    Parameters
+    ----------
+    depth01 : np.ndarray / 정규화된 깊이맵 (0..1 float32)
+    normal_scale : float, default=50.0 / 깊이 기울기 -> 노멀 강도 스케일링
+    
+    Returns
+    -------
+    np.ndarray / 노멀맵 (0~1 범위 float32)
+    """
+    # --- (1) 깊이맵 기울기 계산 ---
+    # 깊이맵의 가로/세로 방향 기울기(gradient)를 계산
+    gy, gx = np.gradient(depth01.astype(np.float32) * normal_scale)
+    
+    # --- (2) 법선 벡터(nx, ny, nz) 계산 ---
+    # nx, ny는 깊이 변화율, nz는 카메라 방향(Z축)
+    nx = -gx
+    ny = gy # Y축 방향을 반전하지 않아도 일반적으로 노멀맵이 올바르게 생성됨
+    nz = np.ones_like(depth01)
+    
+    # --- (3) 벡터 정규화 (길이=1로 맞추기) ---
+    norm = np.sqrt(nx**2 + ny**2 + nz**2)
+    nx /= norm
+    ny /= norm
+    nz /= norm
+    
+    # --- (4) [-1, 1] → [0, 1] 범위로 변환 ---
+    # RGB로 매핑: (nx, ny, nz) → (R, G, B)
+    # 노멀맵의 값은 -1~1 범위에 있으므로 0~1로 매핑해야 이미지로 저장할 수 있음
+    normal = np.stack([
+        (nx + 1) * 0.5,
+        (ny + 1) * 0.5,
+        (nz + 1) * 0.5
+    ], axis=-1)
+    
+    # --- (5) 결과 클리핑 및 반환 ---
+    return np.clip(normal, 0.0, 1.0).astype(np.float32)
+
+
+>>>>>>> 4bdc5bb89478571251b4dbd598614d3d0a91036c
 
