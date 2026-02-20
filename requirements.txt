@@ -1,0 +1,31 @@
+# --- Core Utilities ---
+numpy>=2.2.0
+configobj>=5.0.9
+requests>=2.32.5
+huggingface-hub>=0.34.4
+
+# --- GUI ---
+PySide6>=6.10.0
+pyqtdarktheme>=2.1.0
+
+# --- Image Processing ---
+pillow>=12.0.0
+opencv-python>=4.12.0.88
+
+# --- AI Framework Support ---
+# Torch는 배치 파일에서 하드웨어에 맞게 별도 설치하므로 제외
+accelerate>=1.12.0
+transformers>=4.56.1
+safetensors>=0.7.0
+sentencepiece>=0.2.1
+protobuf
+
+# --- Additional Features ---
+deep-translator>=1.11.4
+gradio_client>=2.0.0
+realesrgan>=0.3.0
+basicsr>=1.4.2
+
+# --- Optional (API Key Support) ---
+pycryptodome>=3.23.0
+google-genai>=1.60.0
