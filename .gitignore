@@ -26,6 +26,13 @@ backup/
 *.swp
 *.swo  
 
+# 압축파일 제외
+*.zip
+*.tar.gz
+*.tar
+*.tar.bz2
+*.7z
+
 # Doc 히스토리 문서
 docs/*history*
 

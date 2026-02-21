@@ -8,12 +8,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QPainter, QColor, QMovie, QFont
 
 # High DPI 자동 스케일링 활성화
-if hasattr(Qt, 'AA_EnableHighDpiScaling'):
-    from PySide6.QtWidgets import QApplication
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
-    from PySide6.QtWidgets import QApplication
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+# if hasattr(Qt, 'AA_EnableHighDpiScaling'):
+#     from PySide6.QtWidgets import QApplication
+#     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+# if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
+#     from PySide6.QtWidgets import QApplication
+#     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
 # High DPI Scaling Fix: 윈도우 배율 설정(125% 등)에 따라 UI가 과도하게 확대되는 것을 방지합니다.
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"

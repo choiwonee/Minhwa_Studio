@@ -1,8 +1,11 @@
+import base64
 import gc
+import httpx
 import os
 import re
 import sys
 import time
+import random
 import tempfile
 import threading
 from datetime import datetime
@@ -21,6 +24,8 @@ import cv2
 from diffusers.utils.logging import disable_progress_bar
 disable_progress_bar()
 
+from google import genai
+from google.genai import types
 from gradio_client import Client, handle_file
 from PIL import Image, ImageOps
 
@@ -392,18 +397,32 @@ class BgComposerApp(QMainWindow):
         return container
 
     def _setup_input_panel(self):
+        """ 1. INPUT IMAGE 패널 UI 설정
+            - 이미지 캔버스, 스크롤바 래퍼 및 플로팅 도구 모음 구성
+            - 캔버스 하단에 Fit, 1:1 뷰어 제어 바(Control Bar)
+        """
+        content_container = QWidget()
+        content_layout = QVBoxLayout(content_container)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        
         self.input_canvas = ImageCanvas(self)
         self.input_canvas.set_mode("box")
         self.input_canvas.on_selection_done = self.on_input_selection_changed
         self.input_canvas.sig_view_changed.connect(self.sync_scrollbars)
         
         canvas_wrapper = self._wrap_canvas_with_scrollbars(self.input_canvas)
+        content_layout.addWidget(canvas_wrapper, 1)
+        
+        # 캔버스 하단 Fit, 1:1 버튼이 포함된 컨트롤 바
+        ctrl_bar = self._create_view_control_bar(self.input_canvas, show_pan=False)
+        content_layout.addWidget(ctrl_bar, 0)
         
         # 도구 툴바 및 팬 버튼 설정
         self.setup_floating_toolbar()
         self.btn_pan_float = self.setup_floating_pan_button(self.input_canvas)
         
-        return self._create_styled_panel("1. INPUT IMAGE (Draw Mask)", canvas_wrapper)
+        return self._create_styled_panel("1. INPUT IMAGE (Draw Mask)", content_container)
 
     def _setup_mask_panel(self):
         content_container = QWidget()
@@ -479,13 +498,11 @@ class BgComposerApp(QMainWindow):
         return container
 
     def _create_control_panel(self):
-        # [타이머 복구]
-        if not hasattr(self, 'auto_trans_timer'):
-            self.auto_trans_timer = QTimer(self)
-            self.auto_trans_timer.setSingleShot(True)
-            self.auto_trans_timer.setInterval(3000) 
-            self.auto_trans_timer.timeout.connect(self.on_retranslate_requested)
-
+        """ 하단 제어 패널(Control Panel) 생성 및 UI 레이아웃 구성
+            - 좌측: 기본 설정 및 상세 파라미터 탭
+            - 우측: 프롬프트 입력, 번역 제어 및 생성 액션 버튼
+            - 수동 프롬프트(Manual Prompt) 활성화 UI를 프롬프트 입력 영역 상단에 노출
+        """
         # 메인 패널 스타일
         panel = QGroupBox("Control Panel")
         panel.setStyleSheet("""
@@ -516,9 +533,7 @@ class BgComposerApp(QMainWindow):
         main_layout.setContentsMargins(6, 10, 6, 6)
         main_layout.setSpacing(10)
 
-        # ==========================================================
         # [LEFT] 설정 탭 (Settings)
-        # ==========================================================
         setting_tabs = QTabWidget()
         setting_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         
@@ -528,34 +543,49 @@ class BgComposerApp(QMainWindow):
         lb.setContentsMargins(8, 8, 8, 8)
         lb.setSpacing(8)
 
-        # 1. 모델 모드
+        # 1. 모델 모드 & 타입
         grp_mode = QWidget()
         l_mode = QHBoxLayout(grp_mode)
         l_mode.setContentsMargins(0,0,0,0)
         l_mode.setSpacing(12)
         
+        # Mode
         self.bg_mode = QButtonGroup(self)
         self.rb_local = QRadioButton("Local")
         self.rb_remote = QRadioButton("Remote")
-        self.bg_mode.addButton(self.rb_local)
-        self.bg_mode.addButton(self.rb_remote)
+        self.bg_mode.addButton(self.rb_local); self.bg_mode.addButton(self.rb_remote)
         self.rb_local.setChecked(True)
-        self.bg_mode.buttonClicked.connect(self.update_model_list)
-        
         l_mode.addWidget(QLabel("Mode:"))
         l_mode.addWidget(self.rb_local)
         l_mode.addWidget(self.rb_remote)
+        
+        # 구분선
+        line = QFrame(); line.setFrameShape(QFrame.VLine); line.setFrameShadow(QFrame.Sunken); line.setStyleSheet("color:#555")
+        l_mode.addWidget(line)
+        
+        # Type
+        self.bg_type = QButtonGroup(self)
+        self.rb_i2i = QRadioButton("I2I") # Image to Image
+        self.rb_t2i = QRadioButton("T2I") # Text to Image
+        self.bg_type.addButton(self.rb_i2i); self.bg_type.addButton(self.rb_t2i)
+        self.rb_i2i.setChecked(True)
+        l_mode.addWidget(QLabel("Type:"))
+        l_mode.addWidget(self.rb_i2i)
+        l_mode.addWidget(self.rb_t2i)
         l_mode.addStretch()
         
         self.btn_token_conf = QPushButton("API Key")
         self.btn_token_conf.setCursor(Qt.PointingHandCursor)
         self.btn_token_conf.setToolTip("HuggingFace / Gemini API 키 설정")
         self.btn_token_conf.clicked.connect(self.open_token_settings)
-        self.btn_token_conf.setStyleSheet("color: #ecc058; border: 1px solid #777; padding: 2px 8px;") 
+        self.btn_token_conf.setStyleSheet("color: #ecc058; border: 1px solid #777;") 
         l_mode.addWidget(self.btn_token_conf)
+
+        self.bg_mode.buttonClicked.connect(self.update_model_list)
+        self.bg_type.buttonClicked.connect(self.update_model_list)
         lb.addWidget(grp_mode)
 
-        # 2. 모델 선택 및 비율 설정 (Grid)
+        # 2. 모델 선택 (Grid)
         grp_model = QGridLayout()
         grp_model.setSpacing(6)
         
@@ -574,19 +604,10 @@ class BgComposerApp(QMainWindow):
         self.lbl_model_status.setAlignment(Qt.AlignCenter)
         self.lbl_model_status.setStyleSheet("background: #222; border: 1px solid #444; border-radius: 3px; color: #888; font-size: 10px;")
         
-        # 추가: Ratio를 Basic으로 이동
-        self.combo_res_mode = QComboBox()
-        for t, d in [("Match Input","match_input"),("1:1 Square","1:1"),("16:9 Wide","16:9"),("9:16 Portrait","9:16"),("4:3 Standard","4:3")]:
-            self.combo_res_mode.addItem(t, d)
-
         grp_model.addWidget(QLabel("Model:"), 0, 0)
         grp_model.addWidget(self.combo_model, 0, 1, 1, 2)
         grp_model.addWidget(self.btn_load, 1, 0, 1, 2)
         grp_model.addWidget(self.lbl_model_status, 1, 2)
-        
-        grp_model.addWidget(QLabel("Ratio:"), 2, 0)
-        grp_model.addWidget(self.combo_res_mode, 2, 1, 1, 2)
-        
         lb.addLayout(grp_model)
 
         # 3. 입력 소스
@@ -596,35 +617,41 @@ class BgComposerApp(QMainWindow):
         # Image Source
         self.chk_use_image = QCheckBox("Image")
         self.chk_use_image.setToolTip("Enable Input Image")
-        btn_img = QPushButton("Open")
-        btn_img.clicked.connect(self.open_image)
-        btn_clear_img = QPushButton("Clear")
-        btn_clear_img.setStyleSheet("color: #e74c3c; font-weight: bold;")
-        btn_clear_img.clicked.connect(self.clear_image)
-
+        
+        btn_image = QPushButton("Open")
+        btn_image.clicked.connect(self.open_image)
+        
+        self.btn_image_clear = QPushButton("Clear")
+        self.btn_image_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_image_clear.setToolTip("입력 이미지 초기화")
+        self.btn_image_clear.setStyleSheet("color: #e74c3c; font-weight: bold; border: 1px solid #555;")
+        self.btn_image_clear.clicked.connect(self.clear_input_image)
+        
         # Mask Source
         self.chk_use_mask = QCheckBox("Mask")
         self.chk_use_mask.setToolTip("Enable Mask")
         self.chk_use_image.toggled.connect(lambda c: self.chk_use_mask.setEnabled(c))
         
-        btn_msk = QPushButton("Open")
-        btn_msk.clicked.connect(self.open_external_mask)
-        btn_clr = QPushButton("Clear")
-        btn_clr.setStyleSheet("color: #e74c3c; font-weight: bold;")
-        btn_clr.clicked.connect(self.clear_external_mask)
+        btn_mask = QPushButton("Open")
+        btn_mask.clicked.connect(self.open_external_mask)
+        
+        btn_mask_clear = QPushButton("Clear")
+        btn_mask_clear.setToolTip("입력 마스크 초기화")
+        btn_mask_clear.setStyleSheet("color: #e74c3c; font-weight: bold;")
+        btn_mask_clear.clicked.connect(self.clear_external_mask)
 
         grp_src.addWidget(self.chk_use_image)
-        grp_src.addWidget(btn_img)
-        grp_src.addWidget(btn_clear_img)
-        
+        grp_src.addWidget(btn_image)
+        grp_src.addWidget(self.btn_image_clear)
         grp_src.addSpacing(5)
+        
         v_sep = QFrame(); v_sep.setFrameShape(QFrame.VLine); v_sep.setFrameShadow(QFrame.Sunken); v_sep.setStyleSheet("color:#444")
         grp_src.addWidget(v_sep)
         grp_src.addSpacing(5)
         
         grp_src.addWidget(self.chk_use_mask)
-        grp_src.addWidget(btn_msk)
-        grp_src.addWidget(btn_clr)
+        grp_src.addWidget(btn_mask)
+        grp_src.addWidget(btn_mask_clear)
         grp_src.addStretch()
         lb.addLayout(grp_src)
         
@@ -649,7 +676,7 @@ class BgComposerApp(QMainWindow):
         tab_params = QWidget()
         lp = QGridLayout(tab_params)
         lp.setContentsMargins(8, 12, 8, 8)
-        lp.setSpacing(10)
+        lp.setSpacing(8)
 
         # Row 0: Steps & CFG
         lp.addWidget(QLabel("Steps:"), 0, 0)
@@ -657,26 +684,33 @@ class BgComposerApp(QMainWindow):
         self.spin_steps.setRange(1, 100); self.spin_steps.setValue(30)
         lp.addWidget(self.spin_steps, 0, 1)
         
-        lp.addWidget(QLabel("CFG Scale:"), 0, 2)
+        lp.addWidget(QLabel("CFG:"), 0, 2)
         self.spin_cfg = QDoubleSpinBox()
         self.spin_cfg.setRange(0.0, 50.0); self.spin_cfg.setValue(7.5); self.spin_cfg.setSingleStep(0.5)
         lp.addWidget(self.spin_cfg, 0, 3)
 
-        # Row 1: Img Guide & Preset
-        self.lbl_img_guidance = QLabel("Img CFG:") 
+        # Row 1: Ratio & Img Guide
+        lp.addWidget(QLabel("Ratio:"), 1, 0)
+        self.combo_res_mode = QComboBox()
+        for t, d in [("Match Input","match_input"),("1:1 Square","1:1"),("16:9 Wide","16:9"),("9:16 Portrait","9:16"),("4:3 Standard","4:3")]:
+            self.combo_res_mode.addItem(t, d)
+        lp.addWidget(self.combo_res_mode, 1, 1)
+
+        self.lbl_img_guidance = QLabel("ImgCFG:") 
         self.spin_img_guidance = QDoubleSpinBox()
         self.spin_img_guidance.setRange(1.0, 10.0); self.spin_img_guidance.setSingleStep(0.1)
         self.lbl_img_guidance.setVisible(False); self.spin_img_guidance.setVisible(False)
-        lp.addWidget(self.lbl_img_guidance, 1, 0)
-        lp.addWidget(self.spin_img_guidance, 1, 1)
+        lp.addWidget(self.lbl_img_guidance, 1, 2)
+        lp.addWidget(self.spin_img_guidance, 1, 3)
 
+        # Row 2: Preset
         lp.addWidget(QLabel("Preset:"), 2, 0)
         self.combo_scenario = QComboBox()
         self.combo_scenario.addItem("- Select -")
         self.combo_scenario.addItems(list(self.scenarios.keys()))
         self.combo_scenario.currentIndexChanged.connect(self.on_scenario_changed)
-        lp.addWidget(self.combo_scenario, 2, 1, 1, 3)
-
+        lp.addWidget(self.combo_scenario, 2, 1, 1, 2)
+        
         # Row 3: Multi-Angle & Upscale
         h_line = QFrame(); h_line.setFrameShape(QFrame.HLine); h_line.setFrameShadow(QFrame.Sunken); h_line.setStyleSheet("color:#444")
         lp.addWidget(h_line, 3, 0, 1, 4)
@@ -701,107 +735,119 @@ class BgComposerApp(QMainWindow):
         row_tools.addWidget(self.btn_upscale_conf)
         row_tools.addStretch()
         lp.addLayout(row_tools, 4, 0, 1, 4)
-
-        # 더미 위젯 (코드 호환성 유지용)
-        self.chk_manual_prompt = QCheckBox("Manual"); self.chk_manual_prompt.setVisible(False)
+      
         self.combo_precision = QComboBox(); self.combo_quant = QComboBox()
         self.upscale_settings = {"scale": 4.0, "tile": 512, "resize_back": True}
-        
-        lp.setRowStretch(5, 1) # 빈 공간 채우기
 
         setting_tabs.addTab(tab_basic, "Basic")
         setting_tabs.addTab(tab_params, "Detail")
 
-        # ==========================================================
         # [RIGHT] 프롬프트 & 생성
-        # ==========================================================
         right_panel = QWidget()
         rp = QVBoxLayout(right_panel)
         rp.setContentsMargins(0, 0, 0, 0)
         rp.setSpacing(6)
 
-        # 1. 헤더
         row_head = QHBoxLayout()
         lbl_title = QLabel("PROMPT INPUT")
         lbl_title.setStyleSheet("color: #bbb; font-weight: bold; font-size: 11px;")
+        
+        # 수동 프롬프트 활성화 위젯 생성
+        self.chk_manual_prompt = QCheckBox("enable manual prompt")
+        self.chk_manual_prompt.setStyleSheet("color: #e67e22; font-weight: bold;")
+        self.chk_manual_prompt.setToolTip("체크 시 번역 및 태그 변환 등을 모두 생략하고 프롬프트 원본을 그대로 전달합니다.")
+        self.chk_manual_prompt.toggled.connect(self.on_manual_prompt_toggled)
+        self.chk_manual_prompt.setChecked(False) # 기본값 선택 해제
         
         self.lbl_p_count = QLabel("P: 0/75"); self.lbl_n_count = QLabel("N: 0/75")
         self.lbl_p_count.setStyleSheet("color:#2ecc71; font-family: Consolas; font-size:10px;")
         self.lbl_n_count.setStyleSheet("color:#e74c3c; font-family: Consolas; font-size:10px;")
         
         row_head.addWidget(lbl_title)
+        row_head.addSpacing(15)
+        row_head.addWidget(self.chk_manual_prompt) # 헤더 영역에 배치 완료
         row_head.addStretch()
         row_head.addWidget(self.lbl_p_count)
         row_head.addSpacing(8)
         row_head.addWidget(self.lbl_n_count)
         rp.addLayout(row_head)
-
-        # 2. 텍스트 에디터 및 버튼 레이아웃 병합
-        input_gen_layout = QHBoxLayout()
         
-        # 좌측: 프롬프트 및 번역창
-        text_layout = QVBoxLayout()
-        text_layout.setSpacing(6)
-        
+        # 2. 텍스트 에디터
         self.txt_prompt = QTextEdit()
         self.txt_prompt.setPlaceholderText("Positive Prompt (한글 가능)")
-        self.txt_prompt.setMinimumHeight(80) # 입력창 높이 대폭 확대
-        self.txt_prompt.setStyleSheet("background: #252525; border: 1px solid #555; border-radius: 4px; padding: 6px;")
+        self.txt_prompt.setFixedHeight(45)
+        self.txt_prompt.setStyleSheet("background: #252525; border: 1px solid #555; border-radius: 3px;")
         
         self.txt_negative = QTextEdit()
-        self.txt_negative.setPlaceholderText("Negative Prompt")
-        self.txt_negative.setMaximumHeight(45) # 부정 프롬프트 창 높이 조절
-        self.txt_negative.setStyleSheet("background: #252525; border: 1px solid #555; border-radius: 4px; padding: 4px;")
+        self.txt_negative.setPlaceholderText("Negative Prompt (부정 프롬프트)")
+        self.txt_negative.setFixedHeight(30)
+        self.txt_negative.setStyleSheet("background: #252525; border: 1px solid #555; border-radius: 3px;")
 
         self.txt_prompt.textChanged.connect(self.update_word_counts)
         self.txt_negative.textChanged.connect(self.update_word_counts)
 
-        text_layout.addWidget(self.txt_prompt)
-        text_layout.addWidget(self.txt_negative)
+        rp.addWidget(self.txt_prompt)
+        rp.addWidget(self.txt_negative)
 
-        # 하단: 번역 결과 및 Run Trans 버튼
-        trans_layout = QHBoxLayout()
-        trans_layout.setSpacing(8)
+        # 3. 하단 액션 바
+        action_box = QWidget()
+        action_layout = QHBoxLayout(action_box)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(8)
         
-        self.btn_retrans = QPushButton("Run Trans")
-        self.btn_retrans.setFixedSize(80, 45) # 버튼 크기 정렬
-        self.btn_retrans.setStyleSheet("background-color: #34495e; color: white; border-radius: 4px; font-weight: bold;")
-        self.btn_retrans.clicked.connect(self.on_retranslate_requested)
+        # 번역 컨트롤
+        trans_area = QWidget()
+        trans_layout = QVBoxLayout(trans_area)
+        trans_layout.setContentsMargins(0,0,0,0)
+        trans_layout.setSpacing(2)
+        
+        trans_tool = QHBoxLayout()
+        self.chk_translate = QCheckBox("use Trans(Ko→En)")
+        self.chk_translate.setChecked(True)
+        self.btn_view_trans = QPushButton("view Result")
+        self.btn_view_trans.setToolTip("입력된 프롬프트를 지금 바로 번역해서 결과 보기")
+        self.btn_view_trans.clicked.connect(self.on_translate_requested)
+        
+        trans_tool.addWidget(self.chk_translate)
+        trans_tool.addSpacing(15)
+        trans_tool.addWidget(self.btn_view_trans)
+        trans_tool.addStretch()
         
         self.txt_trans_result = QTextEdit()
         self.txt_trans_result.setReadOnly(True)
-        self.txt_trans_result.setFixedHeight(45)
-        self.txt_trans_result.setPlaceholderText("수동 번역 결과가 여기에 표시됩니다.")
-        self.txt_trans_result.setStyleSheet("background: #1e1e1e; color: #aaa; border: 1px solid #3d3d3d; font-size: 11px; padding: 4px;")
+        self.txt_trans_result.setFixedHeight(60)
+        self.txt_trans_result.setPlaceholderText("번역 결과가 여기에 표시됩니다.")
+        self.txt_trans_result.setStyleSheet("background: #1e1e1e; color: #888; border: 1px solid #3d3d3d; font-size: 10px; font-family: Consolas;")
         
-        trans_layout.addWidget(self.btn_retrans)
+        self.chk_translate.toggled.connect(self.txt_trans_result.setEnabled)
+        self.chk_translate.toggled.connect(self.update_word_counts)
+        
+        trans_layout.addLayout(trans_tool)
         trans_layout.addWidget(self.txt_trans_result)
-        text_layout.addLayout(trans_layout)
-
-        # 우측: Generate 버튼 (세로로 길게 배치)
+        
+        # 생성 버튼
         self.btn_gen = QPushButton("GENERATE")
-        self.btn_gen.setMinimumHeight(150)
-        self.btn_gen.setFixedWidth(120)
+        self.btn_gen.setFixedSize(100, 55)
         self.btn_gen.setCursor(Qt.PointingHandCursor)
         self.btn_gen.setStyleSheet("""
             QPushButton { 
                 background-color: #d35400; color: white; 
                 font-weight: bold; font-size: 14px;
-                border-radius: 6px; border: 1px solid #e67e22;
+                border-radius: 4px; border: 1px solid #e67e22;
             }
             QPushButton:hover { background-color: #e67e22; border: 1px solid #f39c12; }
-            QPushButton:pressed { background-color: #a84300; margin-top: 2px; }
+            QPushButton:pressed { background-color: #a84300; margin-top: 1px; }
             QPushButton:disabled { background-color: #555; color: #888; border: 1px solid #444; }
         """)
         self.btn_gen.clicked.connect(self.run_generation)
         self._setup_btn_feedback(self.btn_gen)
 
-        input_gen_layout.addLayout(text_layout)
-        input_gen_layout.addWidget(self.btn_gen)
+        action_layout.addWidget(trans_area, 1)
+        action_layout.addWidget(self.btn_gen, 0)
         
-        rp.addLayout(input_gen_layout)
+        rp.addWidget(action_box)
 
-        # 메인 레이아웃 비율 적용
+        # 메인 레이아웃
         main_layout.addWidget(setting_tabs, 45)
         main_layout.addWidget(right_panel, 55)
 
@@ -815,10 +861,23 @@ class BgComposerApp(QMainWindow):
                 self.multi_images.append(f)
 
     def del_multi_images(self):
-        for item in self.list_multi_imgs.selectedItems():
-            row = self.list_multi_imgs.row(item)
+        """ 다중 이미지 리스트에서 선택된 항목들을 안전하게 삭제함
+            배열 인덱스가 당겨져서 엉뚱한 값이 삭제되는 현상을 방지하기 위해 뒷쪽(역순) 인덱스부터 삭제를 진행함
+            - 추가: 항목을 선택하지 않고 삭제 시도 시 사용자에게 경고 팝업 제공 """
+        selected_items = self.list_multi_imgs.selectedItems()
+        
+        # 선택된 아이템이 없을 경우 경고 메시지 팝업 출력 후 종료
+        if not selected_items:
+            QMessageBox.warning(self, "선택 오류", "삭제할 이미지를 먼저 리스트에서 선택해 주세요.")
+            return
+            
+        # 1. UI에서 선택된 아이템의 행(Row) 인덱스를 추출하고 내림차순(역순)으로 정렬
+        rows_to_delete = sorted([self.list_multi_imgs.row(item) for item in selected_items], reverse=True)
+        
+        # 2. 역순으로 UI 목록 위젯 및 백엔드 데이터(self.multi_images)에서 동시 제거
+        for row in rows_to_delete:
             self.list_multi_imgs.takeItem(row)
-            if row < len(self.multi_images):
+            if 0 <= row < len(self.multi_images):
                 self.multi_images.pop(row)
 
     def _setup_btn_feedback(self, btn: QPushButton):
@@ -985,21 +1044,24 @@ class BgComposerApp(QMainWindow):
         self.rb_box.setChecked(True)
 
     def on_input_selection_changed(self, tool_type, data):
+        """ 입력 캔버스의 선택 영역 변경 시 마스크 생성 및 프리뷰 갱신
+            모델 추론 시 전달되는 실제 마스크 데이터와 동일하게, 완전한 검정 배경에 선택 영역만 흰색으로 칠해 직관적으로 표시함 """
         if self.image is None:
             return
             
+        # 1. 캔버스 데이터로부터 1채널 마스크 (0 or 255) 생성
         mask = self.generate_mask_from_canvas()
         
-        # 이미지 채널 수(RGB 또는 RGBA)에 따른 분기 처리
-        if self.image.shape[2] == 4:
-            preview = np.zeros((self.image.shape[0], self.image.shape[1], 4), dtype=np.uint8)
-            preview[:, :, 3] = 255 
-        else:
-            preview = np.zeros_like(self.image)
+        # 2. 프리뷰 시각화를 위해 항상 순수 검정색의 3채널(RGB) 도화지 생성
+        # (원본 이미지의 투명도나 채널 수에 영향을 받지 않고 가장 확실한 마스크 형태를 보장함)
+        h, w = self.image.shape[:2]
+        preview = np.zeros((h, w, 3), dtype=np.uint8)
             
-        # 채널에 맞게 색상 배열 할당 (4채널이면 RGBA, 3채널이면 RGB)
-        preview[mask == 255] = [255, 255, 255, 255] if preview.shape[2] == 4 else [255, 255, 255]
+        # 3. 마스크 값이 255(흰색)인 영역만 프리뷰에 순백색 오버레이
+        if mask is not None:
+            preview[mask == 255] = [255, 255, 255]
         
+        # 4. 마스크 프리뷰 캔버스 갱신
         self.mask_canvas.set_image(preview)
         self.mask_canvas.fit_to_window()
         self.status.showMessage(f"Mask Updated ({tool_type})", 1000)
@@ -1016,33 +1078,208 @@ class BgComposerApp(QMainWindow):
         self.chk_use_mask.setChecked(False)
         gc.collect()
     
+    def clear_input_image(self):
+        # 1. 논리 데이터 초기화
+        self.image = None
+       
+        # 2. 캔버스 시각적 요소 제거
+        # 입력 이미지 캔버스와 결과 이미지 캔버스를 모두 비웁니다.
+        if self.input_canvas:
+            self.input_canvas.set_image(None)
+            self.input_canvas.clear_all_overlays() # 이미지 삭제 시 잔여 오버레이도 함께 정리
+            
+        # 3. 이미지 종속 데이터 정리
+        # 원본 이미지가 삭제되면 기존 마스크 데이터도 유효하지 않으므로 마스크 정리 메서드를 호출합니다.
+        self.clear_all_masks()
+        
+        # 4. UI 상태 동기화
+        if hasattr(self, "chk_use_image"):
+            self.chk_use_image.setChecked(False)
+            
+        # 5. 메모리 정리 및 로그 기록
+        gc.collect()
+        self.log("All input and result images have been cleared.")
+    
+    def clear_all_images(self):
+        """ 모든 입력 및 결과 이미지 데이터 초기화
+            원본, 멀티 이미지 리스트, 결과 이미지를 모두 제거하고 UI 시각적 상태와 완전히 동기화함 """
+        # 1. 논리 데이터 초기화
+        self.image = None
+        self.multi_images = []
+        self.result_image = None
+        
+        # 2. 캔버스 시각적 요소 제거
+        if self.input_canvas:
+            self.input_canvas.set_image(None)
+            self.input_canvas.clear_all_overlays() 
+            
+        if self.result_canvas:
+            self.result_canvas.set_image(None)
+            
+        # Multi-Image UI 리스트에 남은 잔여 텍스트 데이터 완전 삭제
+        if hasattr(self, 'list_multi_imgs'):
+            self.list_multi_imgs.clear()
+            
+        # 3. 마스크 종속 데이터 정리
+        self.clear_all_masks()
+        
+        # 4. UI 상태 동기화
+        if hasattr(self, "chk_use_image"):
+            self.chk_use_image.setChecked(False)
+            
+        # 5. 메모리 정리 및 로그 기록
+        gc.collect()
+        self.log("All input and result images have been cleared.")
+    
     def clear_input_mask(self):
+        """ 사용자가 캔버스에 그린 마스크(Box, Lasso, Brush) 선택 영역을 초기화하고 프리뷰를 갱신함
+            단순 검정 화면을 덮는 대신 갱신 로직을 호출하여 외부 마스크 데이터가 있다면 보존되도록 함 """
         self.input_canvas.reset_selection()
         if self.image is not None:
-            self.mask_canvas.set_image(np.zeros_like(self.image))
+            self.on_input_selection_changed("Clear Canvas", None)
+            
+    def clear_all_inputs(self):
+        """ 입력 이미지, 마스크, 멀티 이미지 등 현재 로드된 모든 데이터를 완전 초기화함 """
+        # 1. 내부 데이터 초기화
+        self.image = None
+        self.multi_images = []
+        self.result_image = None
+        self.external_mask = None
+        
+        # Multi-Image UI 리스트 완전 삭제
+        if hasattr(self, 'list_multi_imgs'):
+            self.list_multi_imgs.clear()
+            
+        # 2. 각 캔버스 이미지 클리어
+        if self.input_canvas: 
+            self.input_canvas.set_image(None)
+            self.input_canvas.clear_selection()
+            
+        if self.mask_canvas: 
+            self.mask_canvas.set_image(None)
+            
+        if self.result_canvas: 
+            self.result_canvas.set_image(None)
+            
+        # 3. UI 체크박스 상태 초기화
+        self.chk_use_image.setChecked(False)
+        self.chk_use_mask.setChecked(False)
+        self.chk_use_mask.setEnabled(False)
+        
+        self.log("All input data and canvases have been cleared.")
     
     def clear_all_masks(self):
+        """ 모든 마스크(내부 드로잉 + 외부 파일) 및 프리뷰 초기화
+            UI 이벤트 루프의 충돌을 방지하며 모든 캔버스 데이터를 완전 삭제 상태로 되돌림 """
+        self.current_mask = None
+        self._last_generated_mask = None
         self.external_mask = None
-        self.input_canvas.clear_all_overlays() 
-        self.input_canvas.set_overlay_mask(None) 
-        self.input_canvas.repaint()
+        
+        self.input_canvas.blockSignals(True)
+        try:
+            self.input_canvas.clear_all_overlays() 
+            self.input_canvas.set_overlay_mask(None) 
+            self.input_canvas.reset_selection() # [추가] 선택 영역 변수 완벽 초기화
+            self.input_canvas.repaint() 
+        finally:
+            self.input_canvas.blockSignals(False)
+
         if self.image is not None:
+            # 갱신 로직을 타게 하여 깨끗한 검은 배경이 렌더링 되도록 유도
             self.on_input_selection_changed("Clear All", None)
         else:
             self.mask_canvas.set_image(None)
-        self.chk_use_mask.setChecked(False)
+            
+        self.mask_canvas.clear_all_overlays()
+        self.mask_canvas.repaint()
 
-    # -----------------------------------------------------------
-    # [누락된 함수 추가] 이 부분을 BgComposerApp 클래스 안에 넣어주세요
-    # -----------------------------------------------------------
+        if hasattr(self, "chk_use_mask"):
+            self.chk_use_mask.setChecked(False)
+
+        self.log("All mask and overlay visuals cleared.")
+
     def clear_external_mask(self):
-        """외부에서 불러온 마스크만 제거"""
+        """ 외부에서 불러온 마스크 데이터만 제거하고 프리뷰 화면을 초기화함 """
         self.external_mask = None
-        # 마스크 사용 체크 해제
-        self.chk_use_mask.setChecked(False)
-        # 화면 갱신
-        self.on_input_selection_changed("Clear External", None)
         
+        # UI 체크 해제 및 프리뷰 갱신 로직 실행
+        if hasattr(self, "chk_use_mask"):
+            self.chk_use_mask.setChecked(False)
+            
+        # "Clear External" 모드로 갱신하여 현재 남은(Box, Brush 등) 마스크만 다시 그리도록 함
+        self.on_input_selection_changed("Clear External", None)
+        self.log("External mask has been removed.")
+    
+    def clear_all_inputs(self):
+        """ 입력 이미지, 마스크 및 결과 화면 전체 초기화
+            - 내부 데이터 변수 및 캔버스 이미지 제거
+            - 체크박스 상태 초기화 및 관련 로그 기록
+        """
+        # 1. 내부 데이터 초기화
+        self.image = None
+        self.multi_images = []
+        self.result_image = None
+        self.external_mask = None
+        
+        # 2. 각 캔버스 이미지 클리어
+        if self.input_canvas: 
+            self.input_canvas.set_image(None)
+            self.input_canvas.clear_selection()
+            
+        if self.mask_canvas: 
+            self.mask_canvas.set_image(None)
+            
+        if self.result_canvas: 
+            self.result_canvas.set_image(None)
+            
+        # 3. UI 상태 초기화
+        self.chk_use_image.setChecked(False)
+        self.chk_use_mask.setChecked(False)
+        self.chk_use_mask.setEnabled(False)
+        
+        # 4. 가비지 컬렉션 호출 및 로그
+        self.log("All input data and canvases have been cleared.")
+    
+    def open_external_mask(self):
+        """ 외부 마스크 이미지를 로드하고 투명도(Alpha)를 명확히 처리하여 마스크로 변환
+            투명한 배경이 흰색 마스크로 잘못 변질되어 화면을 덮는 치명적 렌더링 오류를 차단함 """
+        if self.image is None:
+            QMessageBox.warning(self, "Warning", "Please load the Input Image first.")
+            return
+
+        with SuppressStderr():
+            fname, _ = QFileDialog.getOpenFileName(self, "Open Mask", "", "Images (*.png *.jpg *.bmp)")
+
+        if fname:
+            try:
+                m_pil = Image.open(fname)
+                
+                # 투명 픽셀(Alpha=0)이 흑백 변환 시 흰색으로 왜곡되는 현상 방지
+                if m_pil.mode in ('RGBA', 'LA') or (m_pil.mode == 'P' and 'transparency' in m_pil.info):
+                    m_pil = m_pil.convert("RGBA")
+                    # 투명 영역은 온전한 검은색(0)으로, 마스크 영역은 원래 밝기로 보존하기 위한 배경 합성
+                    bg = Image.new("RGB", m_pil.size, (0, 0, 0))
+                    bg.paste(m_pil, mask=m_pil.split()[3])
+                    m_pil = bg.convert("L")
+                else:
+                    m_pil = m_pil.convert("L")
+
+                # 원본 이미지 크기에 맞춰 크기 조정
+                h, w = self.image.shape[:2]
+                if m_pil.size != (w, h):
+                    m_pil = m_pil.resize((w, h), Image.NEAREST)
+                
+                mask_np = np.array(m_pil)
+                # 이진화 처리 (완전한 흑백 분리)
+                _, self.external_mask = cv2.threshold(mask_np, 127, 255, cv2.THRESH_BINARY)
+
+                self.chk_use_mask.setChecked(True)
+                self.on_input_selection_changed("External File", None)
+
+            except Exception as e:
+                print(f"[Error] Failed to load mask: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to load mask file.\n\nDetails: {e}")
+       
     def open_upscale_settings(self):
         dlg = UpscaleSettingsDialog(self, self.upscale_settings)
         if dlg.exec(): 
@@ -1203,6 +1440,7 @@ class BgComposerApp(QMainWindow):
         prev = self.combo_model.currentData()
         self.combo_model.clear()
         mode = "remote" if self.rb_remote.isChecked() else "local"
+        mtype = "image_to_image" if self.rb_i2i.isChecked() else "text_to_image"
         
         models = []
         for k, v in self.generation_models_dict.items():
@@ -1211,7 +1449,8 @@ class BgComposerApp(QMainWindow):
             
             imode = v.get("mode", "local")
             if (mode=="local" and imode in ["local","both"]) or (mode=="remote" and imode in ["remote","both"]):
-                models.append(v)
+                if v.get("category", "general") == mtype:
+                    models.append(v)
         
         models.sort(key=lambda x: (not x.get('is_default', False), x['short_name']))
         for m in models:
@@ -1299,7 +1538,7 @@ class BgComposerApp(QMainWindow):
             new_text = f"{current_text.strip()} {injection_text.strip()}"
         self.txt_prompt.setPlainText(new_text)
 
-    def on_retranslate_requested(self):
+    def on_translate_requested(self):
         p = self.txt_prompt.toPlainText()
         n = self.txt_negative.toPlainText()
         if p or n: self._run_preview_translation(p, n)
@@ -1335,7 +1574,7 @@ class BgComposerApp(QMainWindow):
             cnt = len(txt.toPlainText().strip().split())
             color = "#ff6b6b" if cnt > limit else "#ecf0f1"
             lbl.setText(f"<b style='color:#74b9ff'>{pre}:</b> <span style='color:{color}'>{cnt}/{limit}</span>")
-    
+        
     def on_scenario_changed(self):
         k = self.combo_scenario.currentText()
         if k in self.scenarios:
@@ -1344,43 +1583,42 @@ class BgComposerApp(QMainWindow):
             self.txt_negative.setText(d.get("negative",""))
 
     def generate_mask_from_canvas(self):
-        if self.image is None: return None
+        """ 캔버스에 그려진 데이터 및 외부 마스크를 취합하여 최종 흑백 마스크 생성
+            원본 이미지의 형태나 투명도(Alpha)가 마스크로 변질되는 현상을 막기 위해 순수 0(Black) 배열에서 시작함 """
+        if self.image is None:
+            return None
+        
         h, w = self.image.shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
-        if self.image.shape[2] == 4:
-            mask = cv2.bitwise_or(mask, (255 - self.image[:,:,3]).astype(np.uint8))
+            
         if self.input_canvas.box_img:
             l, t, r, b = self.input_canvas.box_img
             cv2.rectangle(mask, (int(l), int(t)), (int(r), int(b)), 255, -1)
+            
         if len(self.input_canvas.lasso_img) > 0:
             cv2.fillPoly(mask, [np.array(self.input_canvas.lasso_img, dtype=np.int32)], 255)
+            
         if hasattr(self.input_canvas, 'brush_strokes') and self.input_canvas.brush_strokes:
             for stroke in self.input_canvas.brush_strokes:
                 points = stroke['points']
                 size = stroke['size']
+                
                 if len(points) > 1:
                     pts = np.array(points, dtype=np.int32)
                     for i in range(len(points) - 1):
-                        cv2.line(mask, (int(points[i][0]), int(points[i][1])), (int(points[i+1][0]), int(points[i+1][1])), 255, thickness=int(size))
-                        cv2.circle(mask, (int(points[i][0]), int(points[i][1])), int(size/2), 255, -1)
+                        pt1 = (int(points[i][0]), int(points[i][1]))
+                        pt2 = (int(points[i+1][0]), int(points[i+1][1]))
+                        cv2.line(mask, pt1, pt2, 255, thickness=int(size))
+                        cv2.circle(mask, pt1, int(size/2), 255, -1)
                     cv2.circle(mask, (int(points[-1][0]), int(points[-1][1])), int(size/2), 255, -1)
                 elif len(points) == 1:
                     cv2.circle(mask, (int(points[0][0]), int(points[0][1])), int(size/2), 255, -1)
-
+                    
         if self.external_mask is not None:
             mask = cv2.bitwise_or(mask, self.external_mask)
+            
         _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
         return mask
-
-    def open_external_mask(self):
-        if self.image is None: return
-        with SuppressStderr():
-            fname, _ = QFileDialog.getOpenFileName(self, "Open Mask", "", "Images (*.png *.jpg *.bmp)")
-        if fname:
-            m = Image.open(fname).convert("L").resize((self.image.shape[1], self.image.shape[0]), Image.NEAREST)
-            _, self.external_mask = cv2.threshold(np.array(m), 127, 255, cv2.THRESH_BINARY)
-            self.chk_use_mask.setChecked(True)
-            self.on_input_selection_changed("External", None)
 
     def cancel_generation(self):
         self._cancel_event.set()
@@ -1434,16 +1672,33 @@ class BgComposerApp(QMainWindow):
         self.lbl_model_status.setText("Load Needed")
 
     def on_manual_prompt_toggled(self, checked):
+        """ 수동 프롬프트 모드 토글 핸들러
+            - 활성화 시 번역 관련 제어 UI들을 모두 비활성화 처리
+            - 수정사항: 존재하지 않는 버튼 객체 호출 에러 수정
+        """
         self.chk_translate.setEnabled(not checked)
-        self.btn_retrans.setEnabled(True)
+        self.btn_view_trans.setEnabled(not checked)
 
-    def on_multi_angle_toggled(self, state):
-        is_checked = (state == Qt.Checked) if isinstance(state, int) else state
+    def on_multi_angle_toggled(self, checked):
+        """ 다각도 카메라 제어 체크박스 상태 변경 핸들러
+            - 체크 시 Camera 탭을 가장 앞(0번 인덱스)에 추가하고 포커스 이동
+            - 체크 해제 시 해당 탭 제거
+        """
         idx = self.tabs.indexOf(self.camera_controller)
-        if is_checked and idx == -1: self.tabs.insertTab(0, self.camera_controller, "Camera")
-        elif not is_checked and idx != -1: self.tabs.removeTab(idx)
+        
+        if checked and idx == -1: 
+            self.tabs.insertTab(0, self.camera_controller, "Camera")
+            self.tabs.setCurrentIndex(0) # 탭이 나타나면 즉시 활성화하여 보여줌
+        elif not checked and idx != -1: 
+            self.tabs.removeTab(idx)
 
     def run_generation(self):
+        """ 이미지 생성 추론 실행 요청 처리
+            - 사용자의 프롬프트 설정 및 UI 옵션에 맞춰 최종 데이터를 가공.
+            - 백그라운드 Worker를 통해 로컬 또는 원격 API 추론을 실행.
+            - 추론에 전달되는 최종 프롬프트 텍스트를 Log 창에 기록.
+            - 이미지 생성 추론 실행 요청 처리 및 API Provider에 따른 프롬프트 태그 분기 변환.
+        """
         if self.worker and self.worker.isRunning(): return
         if not self._active_model_config: return QMessageBox.warning(self, "Not Ready", "Model not loaded")
 
@@ -1460,22 +1715,27 @@ class BgComposerApp(QMainWindow):
                 QMessageBox.warning(self, "API Key 누락", "Fal AI API Key가 설정되지 않았습니다.\n[API Key] 버튼을 눌러 키를 설정해주세요.")
                 self.open_token_settings()
                 return
-        # --------------------------------------------------------
 
         p_raw = self.txt_prompt.toPlainText().strip()
         n_raw = self.txt_negative.toPlainText().strip()
         
-        # Manual Mode면 번역 스킵 (기존 호환성 유지)
-        if hasattr(self, 'chk_manual_prompt') and self.chk_manual_prompt.isChecked():
+        # Manual Mode면 번역 스킵
+        if self.chk_manual_prompt.isChecked():
             p_txt, n_txt = p_raw, n_raw
         else:
-            # === 변경된 부분: 무조건 번역 수행 ===
-            p_txt = translator.translate(p_raw) if p_raw else ""
-            n_txt = translator.translate(n_raw) if n_raw else ""
+            if self.chk_translate.isChecked():
+                p_txt = translator.translate(p_raw)
+                n_txt = translator.translate(n_raw)
+            else:
+                p_txt, n_txt = p_raw, n_raw
                 
-            # 태그 변환
-            if hasattr(self, 'chk_multi_angle') and self.chk_multi_angle.isChecked() and "<camera>" in p_raw:
-                p_txt = self._convert_camera_tag_to_sks(p_txt)
+            # 태그 변환 (제미나이 등 모델별 Provider 분기 처리 추가)
+            if self.chk_multi_angle.isChecked() and "<camera>" in p_raw:
+                provider = self._active_model_config.get("provider", "")
+                if provider == "google_genai":
+                    p_txt = self._convert_camera_tag_for_gemini(p_txt)
+                else:
+                    p_txt = self._convert_camera_tag_to_sks(p_txt)
 
         final_rgb = self.image[:,:,:3] if (self.chk_use_image.isChecked() and self.image is not None) else None
         final_mask = self.generate_mask_from_canvas() if (final_rgb is not None and self.chk_use_mask.isChecked()) else None
@@ -1489,6 +1749,13 @@ class BgComposerApp(QMainWindow):
         self._stop_worker('worker')
         self._cancel_event.clear()
         self.toggle_loading(True, "Generating", "Processing...")
+        
+        # 최종 제출 프롬프트를 Log 탭에 기록
+        log_msg = f"[Final Prompt] {p_txt}"
+        if n_txt:
+            log_msg += f" | [Negative] {n_txt}"
+            
+        self.log(log_msg, switch_tab=True)
         
         self.worker = GenericWorker(
             self._task_smart_generation,
@@ -1510,22 +1777,41 @@ class BgComposerApp(QMainWindow):
         )
         self.worker.signal_progress.connect(self.on_progress_update)
         self.worker.signal_finished.connect(self.on_gen_finished)
+        self.worker.error.connect(self.on_worker_error)
         self.worker.finished.connect(lambda: self._stop_worker('worker'))
         self.worker.start()
-    
+
     def on_progress_update(self, percent):
         self.loading_overlay.set_message("GENERATING", f"Processing... ({percent}%)")
 
     def on_gen_finished(self, result):
+        """ 생성 완료 후 결과 이미지를 검증하여 UI에 표시 및 저장
+            - 결과가 PIL Image인 경우 numpy array로 변환하여 캔버스 호환성 확보
+            - 저장 및 갤러리 업데이트 프로세스 수행
+        """
         self.toggle_loading(False)
+        
         if result is not None:
+            # 1. 데이터 타입 변환 (PIL -> Numpy)
+            # 캔버스가 PIL 객체를 직접 지원하지 않을 수 있으므로 RGB 배열로 변환합니다.
+            if hasattr(result, "convert"):
+                result = np.array(result.convert("RGB"))
+            
             self.result_image = result
-            self.result_canvas.set_image(result)
-            self.result_canvas.fit_to_window()
+            
+            # 2. UI 시각화 업데이트
+            if self.result_canvas:
+                self.result_canvas.set_image(result)
+                self.result_canvas.fit_to_window()
+            
+            # 3. 파일 저장 및 후속 작업
             save_image_file(result, f"gen_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png", str(self.output_dir))
             self.update_gallery()
+            self.log("Generation result displayed and saved.")
         else:
-            QMessageBox.warning(self, "Failed", "Generation returned no image.")
+            # 예외가 발생하지 않았더라도 결과가 None인 경우 알림
+            QMessageBox.warning(self, "Generation Failed", "이미지 생성에 실패하였습니다. 모델 설정이나 프롬프트를 확인하세요.")
+            
         gc.collect()
 
     def on_gallery_double_clicked(self, item):
@@ -1570,8 +1856,22 @@ class BgComposerApp(QMainWindow):
     def _update_blinking_message(self): pass
 
     def on_worker_error(self, e):
-        self.toggle_loading(False)
-        QMessageBox.critical(self, "Error", str(e))
+        """ 워커 실행 중 예외 발생 시 호출: 로딩창을 닫고 경고창 표시 """
+        self.toggle_loading(False) # 1. 무조건 로딩 창 중지
+        err_msg = str(e)
+        
+        # 2. 에러 유형별 맞춤 알림
+        if "안전 정책" in err_msg or "Safety" in err_msg or "POLICY" in err_msg:
+            title = "콘텐츠 차단 알림"
+            icon = QMessageBox.Warning
+        else:
+            title = "실행 오류"
+            icon = QMessageBox.Critical
+            
+        QMessageBox(icon, title, f"작업을 완료할 수 없습니다.\n\n사유: {err_msg}", QMessageBox.Ok, self).exec()
+        
+        # 3. 로그 기록 및 탭 이동
+        self.log(f"Error: {err_msg}", switch_tab=True)
 
     def save_result(self):
         if self.result_image is None: return
@@ -1588,25 +1888,69 @@ class BgComposerApp(QMainWindow):
 
     def _parse_camera_tag(self, prompt):
         match = re.search(r"<camera>(.*?)</camera>", prompt, re.DOTALL)
+        
         if not match: return None, (0.0, 0.0, 1.0)
+        
         h_match = re.search(r"horizontal\s*[=:]\s*([-\d\.]+)", match.group(1), re.I)
         v_match = re.search(r"vertical\s*[=:]\s*([-\d\.]+)", match.group(1), re.I)
         z_match = re.search(r"zoom\s*[=:]\s*([-\d\.]+)", match.group(1), re.I)
         h = float(h_match.group(1)) if h_match else 0.0
         v = float(v_match.group(1)) if v_match else 0.0
         z = float(z_match.group(1)) if z_match else 1.0
+        
         return match, (h, v, z)
 
     def _convert_camera_tag_to_sks(self, prompt):
+        """ h, v, z 파싱 값을 기반으로 Qwen 등 모델용 <sks> 태그와 동적 카메라 앵글 프롬프트 생성.
+            - 기존 하드코딩 제거하고 파라미터에 맞게 매핑 처리.
+        """
         match, (h, v, z) = self._parse_camera_tag(prompt)
         if not match: return prompt
-        # Simplified LoRA Trigger Mapping
-        return f"<sks> front view, eye-level shot, medium shot, {prompt.replace(match.group(0), '')}"
+        
+        # 수평(h) 앵글 판단
+        h_desc = "front view"
+        if h <= -30.0: h_desc = "left side view"
+        elif h >= 30.0: h_desc = "right side view"
+        elif abs(h) >= 120.0: h_desc = "back view"
+        
+        # 수직(v) 앵글 판단
+        v_desc = "eye-level shot"
+        if v <= -20.0: v_desc = "low angle shot"
+        elif v >= 20.0: v_desc = "high angle shot"
+        
+        # 줌(z) 거리 판단
+        z_desc = "medium shot"
+        if z >= 1.2: z_desc = "close-up shot"
+        elif z <= 0.8: z_desc = "wide shot"
+        
+        return f"<sks> {h_desc}, {v_desc}, {z_desc}, {prompt.replace(match.group(0), '').strip()}"
 
     def _convert_camera_tag_for_gemini(self, prompt):
+        """ h, v, z 파싱 값을 기반으로 제미나이(나노 바나나 프로)가 인식하기 좋은 자연어 프롬프트 생성.
+            - 카메라 구도를 문장 맨 앞에 자연스럽게 배치하여 합성에 방해되지 않도록 함.
+        """
         match, (h, v, z) = self._parse_camera_tag(prompt)
         if not match: return prompt
-        return f"Front view camera at eye level. {prompt.replace(match.group(0), '')}"
+        
+        # 수평(h) 앵글 판단
+        h_desc = "front view"
+        if h <= -30.0: h_desc = "left side view"
+        elif h >= 30.0: h_desc = "right side view"
+        elif abs(h) >= 120.0: h_desc = "back view"
+        
+        # 수직(v) 앵글 판단
+        v_desc = "eye-level"
+        if v <= -20.0: v_desc = "low angle"
+        elif v >= 20.0: v_desc = "high angle"
+        
+        # 줌(z) 거리 판단
+        z_desc = "medium shot"
+        if z >= 1.2: z_desc = "close-up photo"
+        elif z <= 0.8: z_desc = "wide shot photo"
+        
+        # 모델이 혼동하지 않도록 문법적으로 자연스러운 접두어 생성
+        angle_prefix = f"A {z_desc} taken from {h_desc} at {v_desc}, "
+        return f"{angle_prefix}{prompt.replace(match.group(0), '').strip()}"
 
     def get_hf_client(self, space_url, hf_token=None):
         if not space_url: return None
@@ -1628,98 +1972,263 @@ class BgComposerApp(QMainWindow):
         raise ValueError(f"Unknown provider: {provider}")
 
     def call_gemini_api(self, *, model_cfg, pil_images, prompt, **kwargs):
-        """ Gemini API 호출 (에러 핸들링 추가됨) """
-        try:
-            from google.genai import Client
-            from google.genai.errors import ServerError, ClientError
-        except ImportError:
-            raise ImportError("Google GenAI SDK가 설치되지 않았습니다. (pip install google-genai)")
-
+        """ 제미나이 API 호출: 응답 객체 유효성 검사 강화 및 인페인팅 처리 지원
+            - 전달된 mask 데이터를 활용하여 inpainting-insert 등의 편집 모드를 적용.
+            - 기존 PIL 이미지 배열 뒤에 마스크 이미지를 contents로 추가하여 전송하되, 각 파트의 역할을 텍스트로 명시.
+            - 프롬프트에 원본 이미지의 조명, 색온도, 분위기를 마스크 영역에 강제로 동기화하도록 보정 처리 추가.
+        """
         api_key = kwargs.get("api_key")
         if not api_key: 
-            raise ValueError("Google API Key가 설정되지 않았습니다. [API Key] 버튼을 눌러 키를 입력해주세요.")
-
-        client = Client(api_key=api_key)
+            raise ValueError("Google API Key is missing.")
+            
+        # config.ini에 정의된 gemini-3-pro-image-preview 모델을 우선 사용
+        model_name = model_cfg.get("api_model_uri", "gemini-3-pro-image-preview")
+        client = genai.Client(api_key=api_key)
         
-        # 프롬프트 구성
-        contents = [prompt]
-        if pil_images:
-            contents.extend(pil_images)
-
-        target_model = model_cfg.get("api_model_uri", "gemini-1.5-pro")
-        
-        try:
-            print(f"[Gemini] Requesting to {target_model}...")
-            resp = client.models.generate_content(
-                model=target_model,
-                contents=contents
+        # 마스크 사용 시 이질감을 제거하기 위한 동기화 지시어 주입
+        final_prompt = prompt
+        mask_np = kwargs.get("mask")
+        if mask_np is not None:
+            # 모델이 마스크 영역을 별개의 개체가 아닌 원본의 일부로 인식하도록 강력히 지시
+            sync_instruction = (
+                "CRITICAL: Match the lighting, shadows, color temperature, and texture of the original image "
+                "perfectly in the masked area. The output must be a single, seamless, and natural composite "
+                "without any visible boundary lines."
             )
-            
-            # 응답 처리 및 이미지 추출
-            if resp.candidates and resp.candidates[0].content.parts:
-                for part in resp.candidates[0].content.parts:
-                    if part.inline_data:
-                        return Image.open(BytesIO(part.inline_data.data)).convert("RGB")
-            
-            print("[Gemini] No image found in response.")
-            return None
+            final_prompt = f"{sync_instruction}\n\nTask: {prompt}"
 
-        except ServerError as e:
-            # 503 등 서버 측 에러 처리
-            if "503" in str(e) or "UNAVAILABLE" in str(e):
-                raise RuntimeError("Google 서버가 현재 혼잡하여 요청을 처리할 수 없습니다 (503). 잠시 후(1~2분 뒤) 다시 시도해주세요.")
-            else:
-                raise RuntimeError(f"Google 서버 오류: {e}")
+        gen_temp = kwargs.get("temperature", 0.4) # 조화를 위해 온도를 약간 높여 창의적 합성을 유도
+        res_mode = kwargs.get("resolution_mode", "1:1")
+        
+        gen_config_params = {
+            "response_modalities": ["IMAGE"],
+            "temperature": gen_temp
+        }
 
-        except ClientError as e:
-            # 400 등 클라이언트 요청 에러
-            raise RuntimeError(f"요청이 거부되었습니다 (설정/쿼터 확인): {e}")
+        # 1) 해상도 옵션 설정 
+        img_cfg_args = {}
+        if res_mode != "match_input":
+            gemini_allowed_ratios = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
+            img_cfg_args["aspect_ratio"] = res_mode if res_mode in gemini_allowed_ratios else "1:1"
+
+        if img_cfg_args:
+            gen_config_params["image_config"] = types.ImageConfig(**img_cfg_args)
+
+        # 2) 콘텐츠 구성 (텍스트 레이블 추가로 모델의 오인식 방지)
+        contents = [final_prompt]
+        if pil_images:
+            contents.append("Reference Original Image:")
+            for img in pil_images:
+                if max(img.size) > 2048: 
+                    img = img.copy()
+                    img.thumbnail((2048, 2048), Image.LANCZOS)
+                contents.append(img)
+                
+            # 인페인팅일 경우 마스크 이미지를 레이블과 함께 추가
+            if mask_np is not None:
+                mask_img = Image.fromarray(mask_np).convert("L")
+                if max(mask_img.size) > 2048:
+                    mask_img.thumbnail((2048, 2048), Image.LANCZOS)
+                contents.append("Edit Mask (White indicates the area to change):")
+                contents.append(mask_img)
+                
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(**gen_config_params)
+            )
+
+            if not response or not response.candidates:
+                raise RuntimeError("Gemini API: 안전 정책에 의해 차단되었습니다.")
+
+            candidate = response.candidates[0]
+            finish_reason = getattr(candidate, 'finish_reason', 'UNKNOWN')
+            
+            # 안전 필터 및 파트 검증
+            policy_block_reasons = ["IMAGE_OTHER", "IMAGE_SAFETY", "SAFETY", "RECITATION"]
+            if any(reason in str(finish_reason) for reason in policy_block_reasons):
+                raise RuntimeError(f"GEMINI_POLICY_VIOLATION: (사유: {finish_reason})")
+
+            if not hasattr(candidate, 'content') or not candidate.content or not candidate.content.parts:
+                raise RuntimeError("Gemini API: 생성된 결과가 비어있습니다.")
+
+            for part in candidate.content.parts:
+                if hasattr(part, 'inline_data') and part.inline_data:
+                    return Image.open(BytesIO(part.inline_data.data)).convert("RGB")
+            
+            raise RuntimeError("Gemini API: 이미지 데이터를 찾을 수 없습니다.")
+        
+        except Exception as e:
+            raise RuntimeError(str(e))
+
+    def call_fal_ai_api(self, *, model_id, pil_images, prompt, num_inference_steps, guidance_scale, seed=None, token, use_queue=True, **kwargs):
+        """ huggingface 라우터 Fal-AI API 호출: 4xx/5xx 에러 및 Polling 단계의 예외 처리를 강화하여 UI 프리징 방지
+            - 422 에러 발생 시 서버의 상세 에러 메시지를 파싱하여 사용자에게 전달
+            - Polling 중 발생하는 타임아웃 및 네트워크 오류를 RuntimeError로 래핑하여 워커 에러 시그널 트리거
+            - 프롬프트는 run_generation에서 최종 가공된 텍스트를 그대로 사용함.
+        """
+        if not token:
+            raise RuntimeError("Fal-AI API Key가 누락되었습니다. 설정에서 API 키를 확인해주세요.")
+
+        model_cfg = kwargs.get("model_cfg")
+        api_url = model_cfg.get("api_model_uri")
+
+        if not api_url:
+            base_router = "https://router.huggingface.co/fal-ai"
+            clean_id = model_id.split('/')[-1] if '/' in model_id else model_id
+            api_url = f"{base_router}/{clean_id}"
+
+        if use_queue and "?" not in api_url:
+            api_url += "?_subdomain=queue"
+
+        # 프롬프트 변환은 run_generation 처리 완료 그대로 사용
+        final_prompt = prompt
+
+        def encode_to_b64_dataurl(pil_img):
+            buf = BytesIO()
+            pil_img.save(buf, format="PNG") 
+            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            return f"data:image/png;base64,{b64}"
+
+        payload = {
+            "prompt": final_prompt,
+            "image_urls": [encode_to_b64_dataurl(img) for img in pil_images],
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "seed": seed if seed is not None else random.randint(0, 2**32 - 1),
+        }
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            with httpx.Client(timeout=300.0) as client:
+                # 1. 작업 제출 단계
+                resp = client.post(api_url, headers=headers, json=payload)
+                
+                if resp.status_code >= 400:
+                    try:
+                        err_json = resp.json()
+                        detail = err_json.get('detail', str(err_json))
+                    except:
+                        detail = resp.text
+                    raise RuntimeError(f"Fal-AI API 요청 실패 ({resp.status_code}):\n{detail}")
+                
+                result = resp.json()
+                img_info = None
+
+                # 2. Queue Polling 단계
+                if result.get("status") == "IN_QUEUE" and "response_url" in result:
+                    response_url = result["response_url"]
+                    
+                    for i in range(150): # 최대 약 225초 대기
+                        if self._should_cancel():
+                            raise RuntimeError("USER_CANCEL")
+                            
+                        time.sleep(1.5)
+                        poll = client.get(response_url, headers=headers)
+                        
+                        if poll.status_code >= 400:
+                            raise RuntimeError(f"Fal-AI Polling 오류 ({poll.status_code}): {poll.text}")
+
+                        poll_json = poll.json()
+
+                        if "images" in poll_json and poll_json["images"]:
+                            img_info = poll_json["images"][0]
+                            break
+                        
+                        if poll_json.get("status") == "COMPLETED" and not poll_json.get("images"):
+                            raise RuntimeError("Fal-AI: 작업은 완료되었으나 생성된 이미지가 없습니다.")
+                    else:
+                        raise RuntimeError("Fal-AI: 대기열 시간이 초과되었습니다.")
+                
+                elif "images" in result and result["images"]:
+                    img_info = result["images"][0]
+                else:
+                    raise RuntimeError("Fal-AI: 응답 데이터 형식이 올바르지 않습니다.")
+
+                # 3. 이미지 데이터 복구
+                if img_info:
+                    if "url" in img_info:
+                        img_resp = client.get(img_info["url"], timeout=60.0)
+                        img_resp.raise_for_status()
+                        return Image.open(BytesIO(img_resp.content)).convert("RGB")
+                    elif "base64" in img_info:
+                        return Image.open(BytesIO(base64.b64decode(img_info["base64"]))).convert("RGB")
+
+                raise RuntimeError("Fal-AI: 유효한 이미지 데이터를 수신하지 못했습니다.")
 
         except Exception as e:
-            raise RuntimeError(f"Gemini API 호출 실패: {e}")
-        
-    def call_fal_ai_api(self, *, model_id, pil_images, prompt, num_inference_steps, guidance_scale, token, **kwargs):
-        # Fal-AI Logic
-        pass 
+            # 예외를 RuntimeError로 통합하여 GenericWorker.error 시그널로 전달
+            raise RuntimeError(str(e))
 
-    def call_hf_space_api(self, *, model_cfg, pil_images, mask, prompt, negative_prompt, num_inference_steps=30, hf_token=None, abort_check=None, **kwargs):
-        client = self.get_hf_client(model_cfg.get("remote_url"), hf_token=hf_token)
-        pipeline_type = model_cfg.get("pipeline_type", "").lower()
-        api_name = model_cfg.get("api_model_uri", "/infer")
-        
-        # 1. Qwen-Edit-2511
-        if "qwen" in pipeline_type:
-            if not pil_images: raise ValueError("Image required")
-            # Qwen Payload Placeholder
-            return Image.new("RGB", (1024, 1024))
+    def call_hf_space_api(self, *, model_cfg, pil_images, mask, prompt, negative_prompt, num_inference_steps=30, hf_token=None, **kwargs):
+        """ HF Space API 호출: Gradio Client의 예측 실패 및 연결 오류를 RuntimeError로 포워딩
+            - API 호출 전후의 세션 유효성을 검증하고 실패 시 명시적 에러 메시지 생성
+            - 임시 파일 생성 및 파일 핸들링 중 발생하는 IO 예외 처리 포함
+        """
+        try:
+            client = self.get_hf_client(model_cfg.get("remote_url"), hf_token=hf_token)
+            pipeline_type = model_cfg.get("pipeline_type", "").lower()
+            api_name = model_cfg.get("api_model_uri", "/infer")
+            
+            if "qwen" in pipeline_type:
+                # Qwen-Edit 전용 로직 (현재는 Placeholder 상태이나 에러 핸들링 구조 확보)
+                if not pil_images: 
+                    raise RuntimeError("Qwen 모델 실행을 위해 입력 이미지가 필요합니다.")
+                # 실제 구현 시 client.predict 호출 및 결과 검증 로직 추가
+                return Image.new("RGB", (1024, 1024))
 
-        # 2. General SD Inpaint
-        elif "inpaint" in pipeline_type:
-            # DreamShaper Remote Fallback
-            predict_kwargs = {
-                "prompt": prompt, "negative_prompt": negative_prompt, "num_inference_steps": num_inference_steps,
-                "guidance_scale": kwargs.get("guidance_scale", 7.5), "width": kwargs.get("width", 512), "height": kwargs.get("height", 512),
-                "api_name": api_name
-            }
-            if pil_images:
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                    pil_images[0].save(tf.name)
-                    predict_kwargs["image"] = handle_file(tf.name)
-            if mask is not None:
-                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                    Image.fromarray(mask).save(tf.name)
-                    predict_kwargs["mask_image"] = handle_file(tf.name)
+            elif "inpaint" in pipeline_type:
+                predict_kwargs = {
+                    "prompt": prompt, "negative_prompt": negative_prompt, 
+                    "num_inference_steps": num_inference_steps,
+                    "guidance_scale": kwargs.get("guidance_scale", 7.5),
+                    "api_name": api_name
+                }
+                
+                # 이미지 및 마스크 임시 파일 처리
+                temp_files = []
+                if pil_images:
+                    tf_img = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    pil_images[0].save(tf_img.name)
+                    predict_kwargs["image"] = handle_file(tf_img.name)
+                    temp_files.append(tf_img.name)
+                
+                if mask is not None:
+                    tf_mask = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    Image.fromarray(mask).save(tf_mask.name)
+                    predict_kwargs["mask_image"] = handle_file(tf_mask.name)
+                    temp_files.append(tf_mask.name)
                     
-            try:
-                res = client.predict(**predict_kwargs)
-                if isinstance(res, str): return Image.open(res).convert("RGB")
-                if isinstance(res, dict) and "image" in res: return Image.open(res["image"]).convert("RGB")
-                return Image.open(res).convert("RGB")
-            except Exception as e:
-                print(f"HF Space Error: {e}")
-                return Image.new("RGB", (512, 512))
+                try:
+                    res = client.predict(**predict_kwargs)
+                    
+                    # 결과 객체 파싱
+                    img_path = None
+                    if isinstance(res, str): img_path = res
+                    elif isinstance(res, dict) and "image" in res: img_path = res["image"]
+                    elif isinstance(res, (list, tuple)) and len(res) > 0: img_path = res[0]
+                    
+                    if img_path and os.path.exists(img_path):
+                        return Image.open(img_path).convert("RGB")
+                    else:
+                        raise RuntimeError("HF Space: 생성이 완료되었으나 결과 파일 경로가 유효하지 않습니다.")
+                        
+                finally:
+                    # 사용된 임시 파일 정리
+                    for f in temp_files:
+                        try: os.unlink(f)
+                        except: pass
+            
+            raise RuntimeError(f"HF Space: 지원하지 않는 파이프라인 타입입니다. ({pipeline_type})")
 
-        return Image.new("RGB", (512, 512)) # Fallback
+        except Exception as e:
+            # Gradio AppError 등을 포함한 모든 예외를 상위 워커로 전달
+            raise RuntimeError(f"HF Space API 오류: {str(e)}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
