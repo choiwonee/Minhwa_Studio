@@ -1697,7 +1697,7 @@ class BgComposerApp(QMainWindow):
             - 사용자의 프롬프트 설정 및 UI 옵션에 맞춰 최종 데이터를 가공.
             - 백그라운드 Worker를 통해 로컬 또는 원격 API 추론을 실행.
             - 추론에 전달되는 최종 프롬프트 텍스트를 Log 창에 기록.
-            - 이미지 생성 추론 실행 요청 처리 및 API Provider에 따른 프롬프트 태그 분기 변환.
+            - API Provider 및 라우터 주소에 따라 필요한 인증 키(Token)를 검증.
         """
         if self.worker and self.worker.isRunning(): return
         if not self._active_model_config: return QMessageBox.warning(self, "Not Ready", "Model not loaded")
@@ -1711,10 +1711,18 @@ class BgComposerApp(QMainWindow):
                 QMessageBox.warning(self, "API Key 누락", "Google API Key가 설정되지 않았습니다.\n[API Key] 버튼을 눌러 키를 설정해주세요.")
                 self.open_token_settings()
                 return
-            elif provider == "fal_ai" and not token_key.get_valid_api_key():
-                QMessageBox.warning(self, "API Key 누락", "Fal AI API Key가 설정되지 않았습니다.\n[API Key] 버튼을 눌러 키를 설정해주세요.")
-                self.open_token_settings()
-                return
+            elif provider == "fal_ai":
+                api_uri = self._active_model_config.get("api_model_uri", "")
+                # HF 라우터를 통하는 경우 HF 토큰 검사
+                if "router.huggingface.co" in api_uri and not token_key.get_valid_hf_token():
+                    QMessageBox.warning(self, "Token 누락", "Hugging Face 라우터를 통한 Fal-AI 모델 접근 시 HF Token이 필요합니다.\n[API Key] 버튼을 눌러 설정해주세요.")
+                    self.open_token_settings()
+                    return
+                # 순수 fal.ai API를 직접 사용하는 경우 (향후 확장성 고려)
+                elif "router.huggingface.co" not in api_uri and not token_key.get_valid_api_key():
+                    QMessageBox.warning(self, "API Key 누락", "Fal AI API Key가 설정되지 않았습니다.\n[API Key] 버튼을 눌러 키를 설정해주세요.")
+                    self.open_token_settings()
+                    return
 
         p_raw = self.txt_prompt.toPlainText().strip()
         n_raw = self.txt_negative.toPlainText().strip()
@@ -1960,15 +1968,30 @@ class BgComposerApp(QMainWindow):
         return HF_CLIENT_CACHE[key]
 
     def call_remote_api(self, *, model_cfg, **kwargs):
+        """ 원격 API 호출 분기 처리: Provider 및 라우터 주소에 따른 적절한 API 호출 및 토큰 할당 수행 """
         provider = model_cfg.get("provider", "hf_space")
-        if provider == "google_genai": return self.call_gemini_api(model_cfg=model_cfg, **kwargs)
+        
+        if provider == "google_genai": 
+            return self.call_gemini_api(model_cfg=model_cfg, **kwargs)
+            
         elif provider == "fal_ai":
+            # api_model_uri에 허깅페이스 라우터 주소가 포함되어 있는지 확인하여 토큰 분기 처리
+            api_uri = model_cfg.get("api_model_uri", "")
+            
+            if "router.huggingface.co" in api_uri:
+                target_token = kwargs.get("hf_token")
+            else:
+                target_token = kwargs.get("api_key")
+                
             return self.call_fal_ai_api(
                 model_id=model_cfg.get("repo_id"), 
-                token=kwargs.get("api_key") if "fal" in model_cfg.get("remote_url") else kwargs.get("hf_token"),
+                token=target_token,
                 model_cfg=model_cfg, **kwargs
             )
-        elif provider == "hf_space": return self.call_hf_space_api(model_cfg=model_cfg, **kwargs)
+            
+        elif provider == "hf_space": 
+            return self.call_hf_space_api(model_cfg=model_cfg, **kwargs)
+            
         raise ValueError(f"Unknown provider: {provider}")
 
     def call_gemini_api(self, *, model_cfg, pil_images, prompt, **kwargs):
@@ -2063,10 +2086,8 @@ class BgComposerApp(QMainWindow):
             raise RuntimeError(str(e))
 
     def call_fal_ai_api(self, *, model_id, pil_images, prompt, num_inference_steps, guidance_scale, seed=None, token, use_queue=True, **kwargs):
-        """ huggingface 라우터 Fal-AI API 호출: 4xx/5xx 에러 및 Polling 단계의 예외 처리를 강화하여 UI 프리징 방지
-            - 422 에러 발생 시 서버의 상세 에러 메시지를 파싱하여 사용자에게 전달
-            - Polling 중 발생하는 타임아웃 및 네트워크 오류를 RuntimeError로 래핑하여 워커 에러 시그널 트리거
-            - 프롬프트는 run_generation에서 최종 가공된 텍스트를 그대로 사용함.
+        """ Fal-AI API 호출: 큐(Queue) 방식 추론에 맞춘 상태 폴링(Polling) 로직 수정 적용
+            - 400 에러(Request is still in progress) 방지를 위해 response_url 대신 status_url을 먼저 폴링하여 작업 완료를 대기하도록 개선.
         """
         if not token:
             raise RuntimeError("Fal-AI API Key가 누락되었습니다. 설정에서 API 키를 확인해주세요.")
@@ -2120,8 +2141,9 @@ class BgComposerApp(QMainWindow):
                 result = resp.json()
                 img_info = None
 
-                # 2. Queue Polling 단계
-                if result.get("status") == "IN_QUEUE" and "response_url" in result:
+                # 2. Queue Polling 단계 (수정된 핵심 로직: status_url 폴링 후 response_url 호출)
+                if result.get("status") in ["IN_QUEUE", "IN_PROGRESS"] and "status_url" in result:
+                    status_url = result["status_url"]
                     response_url = result["response_url"]
                     
                     for i in range(150): # 최대 약 225초 대기
@@ -2129,22 +2151,40 @@ class BgComposerApp(QMainWindow):
                             raise RuntimeError("USER_CANCEL")
                             
                         time.sleep(1.5)
-                        poll = client.get(response_url, headers=headers)
+                        
+                        # 결과 URL이 아닌 상태 URL(status_url)을 찔러 400 에러를 방지함
+                        poll = client.get(status_url, headers=headers)
                         
                         if poll.status_code >= 400:
-                            raise RuntimeError(f"Fal-AI Polling 오류 ({poll.status_code}): {poll.text}")
+                            raise RuntimeError(f"Fal-AI Polling 상태 확인 오류 ({poll.status_code}): {poll.text}")
 
                         poll_json = poll.json()
+                        current_status = poll_json.get("status")
 
-                        if "images" in poll_json and poll_json["images"]:
-                            img_info = poll_json["images"][0]
-                            break
-                        
-                        if poll_json.get("status") == "COMPLETED" and not poll_json.get("images"):
-                            raise RuntimeError("Fal-AI: 작업은 완료되었으나 생성된 이미지가 없습니다.")
+                        if current_status == "COMPLETED":
+                            # 작업이 완료되었을 때 비로소 최종 결과 데이터(response_url)를 요청함
+                            final_resp = client.get(response_url, headers=headers)
+                            if final_resp.status_code >= 400:
+                                raise RuntimeError(f"Fal-AI 최종 결과 로드 오류 ({final_resp.status_code}): {final_resp.text}")
+                                
+                            final_json = final_resp.json()
+                            if "images" in final_json and final_json["images"]:
+                                img_info = final_json["images"][0]
+                                break
+                            else:
+                                raise RuntimeError("Fal-AI: 작업은 완료되었으나 생성된 이미지가 없습니다.")
+                                
+                        elif current_status in ["IN_QUEUE", "IN_PROGRESS"]:
+                            continue # 작업 중이므로 루프를 계속 돌며 대기
+                        else:
+                            # 예상치 못한 상태이거나 폴링 중 이미지가 바로 내려왔을 경우 대비
+                            if "images" in poll_json and poll_json["images"]:
+                                img_info = poll_json["images"][0]
+                                break
                     else:
                         raise RuntimeError("Fal-AI: 대기열 시간이 초과되었습니다.")
                 
+                # 큐를 타지 않고 즉시 반환된 경우 (동기 처리)
                 elif "images" in result and result["images"]:
                     img_info = result["images"][0]
                 else:
@@ -2162,7 +2202,7 @@ class BgComposerApp(QMainWindow):
                 raise RuntimeError("Fal-AI: 유효한 이미지 데이터를 수신하지 못했습니다.")
 
         except Exception as e:
-            # 예외를 RuntimeError로 통합하여 GenericWorker.error 시그널로 전달
+            # 예외를 RuntimeError로 통합하여 워커 시그널로 전달
             raise RuntimeError(str(e))
 
     def call_hf_space_api(self, *, model_cfg, pil_images, mask, prompt, negative_prompt, num_inference_steps=30, hf_token=None, **kwargs):
