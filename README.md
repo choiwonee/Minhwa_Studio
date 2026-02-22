@@ -42,7 +42,7 @@ pip install hf-xet opencv-python
 
 ## 📜 라이선스
 
-##rag
+## rag
 1. 라이브러리 설치
 pip install sentence-transformers faiss-cpu numpy
 
