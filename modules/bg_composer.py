@@ -1067,42 +1067,67 @@ class BgComposerApp(QMainWindow):
         self.status.showMessage(f"Mask Updated ({tool_type})", 1000)
         
     def clear_image(self):
+        """ 단일 이미지 및 마스크 기본 초기화
+            - 원본 이미지 및 캔버스 화면 제거
+            - 다각도 카메라 제어(Camera 탭)의 썸네일 이미지 초기화 추가
+        """
         self.image = None
         self.external_mask = None
+        
         if hasattr(self, 'input_canvas') and self.input_canvas:
             self.input_canvas.set_image(None)
             self.input_canvas.reset_selection()
+            
         if hasattr(self, 'mask_canvas') and self.mask_canvas:
             self.mask_canvas.set_image(None)
-        self.chk_use_image.setChecked(False)
-        self.chk_use_mask.setChecked(False)
+            
+        # 카메라 썸네일 초기화
+        if hasattr(self, 'camera_controller') and self.camera_controller:
+            self.camera_controller.set_thumbnail(None)
+            
+        if hasattr(self, 'chk_use_image'):
+            self.chk_use_image.setChecked(False)
+            
+        if hasattr(self, 'chk_use_mask'):
+            self.chk_use_mask.setChecked(False)
+            
         gc.collect()
     
     def clear_input_image(self):
+        """ 입력 이미지 및 종속된 시각적 데이터 완전 초기화
+            - 원본 이미지 데이터 및 캔버스 오버레이 제거
+            - 다각도 카메라 제어(Camera 탭)의 썸네일 이미지 동기화 초기화
+            - 마스크 데이터 및 UI 체크박스 상태 동기화 처리
+        """
         # 1. 논리 데이터 초기화
         self.image = None
        
         # 2. 캔버스 시각적 요소 제거
-        # 입력 이미지 캔버스와 결과 이미지 캔버스를 모두 비웁니다.
         if self.input_canvas:
             self.input_canvas.set_image(None)
-            self.input_canvas.clear_all_overlays() # 이미지 삭제 시 잔여 오버레이도 함께 정리
+            self.input_canvas.clear_all_overlays() 
             
-        # 3. 이미지 종속 데이터 정리
-        # 원본 이미지가 삭제되면 기존 마스크 데이터도 유효하지 않으므로 마스크 정리 메서드를 호출합니다.
+        # 3. 카메라 컨트롤러 썸네일 초기화
+        if hasattr(self, 'camera_controller') and self.camera_controller:
+            self.camera_controller.set_thumbnail(None)
+            
+        # 4. 이미지 종속 데이터 정리
         self.clear_all_masks()
         
-        # 4. UI 상태 동기화
+        # 5. UI 상태 동기화
         if hasattr(self, "chk_use_image"):
             self.chk_use_image.setChecked(False)
             
-        # 5. 메모리 정리 및 로그 기록
+        # 6. 메모리 정리 및 로그 기록
         gc.collect()
-        self.log("All input and result images have been cleared.")
+        self.log("Input image and related data have been cleared.")
     
     def clear_all_images(self):
-        """ 모든 입력 및 결과 이미지 데이터 초기화
-            원본, 멀티 이미지 리스트, 결과 이미지를 모두 제거하고 UI 시각적 상태와 완전히 동기화함 """
+        """ 모든 입력 및 결과 이미지 데이터 통합 초기화
+            - 원본, 멀티 이미지 리스트, 결과 이미지를 모두 제거
+            - 카메라 컨트롤러 썸네일 이미지 초기화
+            - UI 시각적 상태와 완전히 동기화함
+        """
         # 1. 논리 데이터 초기화
         self.image = None
         self.multi_images = []
@@ -1116,41 +1141,46 @@ class BgComposerApp(QMainWindow):
         if self.result_canvas:
             self.result_canvas.set_image(None)
             
-        # Multi-Image UI 리스트에 남은 잔여 텍스트 데이터 완전 삭제
+        # 3. 카메라 컨트롤러 썸네일 초기화
+        if hasattr(self, 'camera_controller') and self.camera_controller:
+            self.camera_controller.set_thumbnail(None)
+            
+        # 4. Multi-Image UI 리스트 완전 삭제
         if hasattr(self, 'list_multi_imgs'):
             self.list_multi_imgs.clear()
             
-        # 3. 마스크 종속 데이터 정리
+        # 5. 마스크 종속 데이터 정리
         self.clear_all_masks()
         
-        # 4. UI 상태 동기화
+        # 6. UI 상태 동기화
         if hasattr(self, "chk_use_image"):
             self.chk_use_image.setChecked(False)
             
-        # 5. 메모리 정리 및 로그 기록
+        # 7. 메모리 정리 및 로그 기록
         gc.collect()
         self.log("All input and result images have been cleared.")
-    
-    def clear_input_mask(self):
-        """ 사용자가 캔버스에 그린 마스크(Box, Lasso, Brush) 선택 영역을 초기화하고 프리뷰를 갱신함
-            단순 검정 화면을 덮는 대신 갱신 로직을 호출하여 외부 마스크 데이터가 있다면 보존되도록 함 """
-        self.input_canvas.reset_selection()
-        if self.image is not None:
-            self.on_input_selection_changed("Clear Canvas", None)
-            
+        
     def clear_all_inputs(self):
-        """ 입력 이미지, 마스크, 멀티 이미지 등 현재 로드된 모든 데이터를 완전 초기화함 """
+        """ [통합] 입력 이미지, 마스크 및 결과 화면 전체 초기화
+            - 내부 데이터 변수 및 캔버스 이미지 일괄 제거
+            - 카메라 컨트롤러 썸네일 포함 UI 상태 초기화
+            - 체크박스 상태 초기화 및 관련 로그 기록
+        """
         # 1. 내부 데이터 초기화
         self.image = None
         self.multi_images = []
         self.result_image = None
         self.external_mask = None
         
-        # Multi-Image UI 리스트 완전 삭제
+        # 2. 카메라 컨트롤러 썸네일 초기화
+        if hasattr(self, 'camera_controller') and self.camera_controller:
+            self.camera_controller.set_thumbnail(None)
+            
+        # 3. Multi-Image UI 리스트 완전 삭제
         if hasattr(self, 'list_multi_imgs'):
             self.list_multi_imgs.clear()
-            
-        # 2. 각 캔버스 이미지 클리어
+        
+        # 4. 각 캔버스 이미지 클리어
         if self.input_canvas: 
             self.input_canvas.set_image(None)
             self.input_canvas.clear_selection()
@@ -1161,13 +1191,25 @@ class BgComposerApp(QMainWindow):
         if self.result_canvas: 
             self.result_canvas.set_image(None)
             
-        # 3. UI 체크박스 상태 초기화
-        self.chk_use_image.setChecked(False)
-        self.chk_use_mask.setChecked(False)
-        self.chk_use_mask.setEnabled(False)
+        # 5. UI 체크박스 상태 초기화
+        if hasattr(self, "chk_use_image"):
+            self.chk_use_image.setChecked(False)
+            
+        if hasattr(self, "chk_use_mask"):
+            self.chk_use_mask.setChecked(False)
+            self.chk_use_mask.setEnabled(False)
         
+        # 6. 메모리 정리 및 로그 기록
+        gc.collect()
         self.log("All input data and canvases have been cleared.")
     
+    def clear_input_mask(self):
+        """ 사용자가 캔버스에 그린 마스크(Box, Lasso, Brush) 선택 영역을 초기화하고 프리뷰를 갱신함
+            단순 검정 화면을 덮는 대신 갱신 로직을 호출하여 외부 마스크 데이터가 있다면 보존되도록 함 """
+        self.input_canvas.reset_selection()
+        if self.image is not None:
+            self.on_input_selection_changed("Clear Canvas", None)
+            
     def clear_all_masks(self):
         """ 모든 마스크(내부 드로잉 + 외부 파일) 및 프리뷰 초기화
             UI 이벤트 루프의 충돌을 방지하며 모든 캔버스 데이터를 완전 삭제 상태로 되돌림 """
@@ -1209,36 +1251,6 @@ class BgComposerApp(QMainWindow):
         # "Clear External" 모드로 갱신하여 현재 남은(Box, Brush 등) 마스크만 다시 그리도록 함
         self.on_input_selection_changed("Clear External", None)
         self.log("External mask has been removed.")
-    
-    def clear_all_inputs(self):
-        """ 입력 이미지, 마스크 및 결과 화면 전체 초기화
-            - 내부 데이터 변수 및 캔버스 이미지 제거
-            - 체크박스 상태 초기화 및 관련 로그 기록
-        """
-        # 1. 내부 데이터 초기화
-        self.image = None
-        self.multi_images = []
-        self.result_image = None
-        self.external_mask = None
-        
-        # 2. 각 캔버스 이미지 클리어
-        if self.input_canvas: 
-            self.input_canvas.set_image(None)
-            self.input_canvas.clear_selection()
-            
-        if self.mask_canvas: 
-            self.mask_canvas.set_image(None)
-            
-        if self.result_canvas: 
-            self.result_canvas.set_image(None)
-            
-        # 3. UI 상태 초기화
-        self.chk_use_image.setChecked(False)
-        self.chk_use_mask.setChecked(False)
-        self.chk_use_mask.setEnabled(False)
-        
-        # 4. 가비지 컬렉션 호출 및 로그
-        self.log("All input data and canvases have been cleared.")
     
     def open_external_mask(self):
         """ 외부 마스크 이미지를 로드하고 투명도(Alpha)를 명확히 처리하여 마스크로 변환
@@ -1633,14 +1645,18 @@ class BgComposerApp(QMainWindow):
             try:
                 return self.diffusion_estimator.predict(**kwargs)
             except Exception as e:
-                print(f"Local failed: {e}. Switching to Remote.")
-                execution_mode = "remote"
+                # 무조건 Remote로 전환하지 않고, 모델이 Remote를 지원할 때만 전환하도록 변경
+                if model_cfg.get("mode") in ["remote", "both"]:
+                    print(f"Local failed: {e}. Switching to Remote.")
+                    execution_mode = "remote"
+                else:
+                    # 로컬 전용 모델이면 예외를 그대로 발생시켜 워커가 정상적으로 에러 처리하게 함
+                    raise RuntimeError(f"Local 추론 실패 (필수 입력값을 확인하세요): {e}")
         
         if execution_mode == "remote":
             gen_pil = self.call_remote_api(model_cfg=model_cfg, **kwargs)
-            # kwargs['image']는 numpy 배열, Manual Post Process를 위해 전달
-            # use_input_image가 False여도 합성할 배경이 있으면 전달 필요할 수 있으나 기본 로직 유지
             post_mask = kwargs.get("mask") if kwargs.get("use_mask") else None
+            
             return self.diffusion_estimator.manual_post_process(
                 gen_pil, kwargs.get("image"), post_mask, upscale_opts=kwargs.get("upscale_opts")
             )
@@ -1698,6 +1714,7 @@ class BgComposerApp(QMainWindow):
             - 백그라운드 Worker를 통해 로컬 또는 원격 API 추론을 실행.
             - 추론에 전달되는 최종 프롬프트 텍스트를 Log 창에 기록.
             - API Provider 및 라우터 주소에 따라 필요한 인증 키(Token)를 검증.
+            - API가 이미지를 필수로 요구할 경우, UI 상 이미지 누락 여부 사전 검증.
         """
         if self.worker and self.worker.isRunning(): return
         if not self._active_model_config: return QMessageBox.warning(self, "Not Ready", "Model not loaded")
@@ -1748,11 +1765,30 @@ class BgComposerApp(QMainWindow):
         final_rgb = self.image[:,:,:3] if (self.chk_use_image.isChecked() and self.image is not None) else None
         final_mask = self.generate_mask_from_canvas() if (final_rgb is not None and self.chk_use_mask.isChecked()) else None
         
+        # 대상 이미지 수집 로직: None 및 빈 객체 사전 검증 추가 (Multi-line 적용)
         target_imgs = []
-        if final_rgb is not None: target_imgs.append(final_rgb)
+        
+        if final_rgb is not None:
+            target_imgs.append(final_rgb)
+            
         for f in self.multi_images:
-            try: target_imgs.append(np.array(Image.open(f).convert("RGB")))
-            except: pass
+            if not f:  # None 이거나 빈 문자열일 경우 안전하게 스킵
+                continue
+            try:
+                img = Image.open(f).convert("RGB")
+                target_imgs.append(np.array(img))
+            except Exception:
+                pass
+
+        # --- [예외 처리 추가] 수집된 이미지가 없는 경우의 방어 로직 ---
+        # 원격 API 사용 시 모델 URI에 image-to-image 등 이미지가 필수적인 키워드가 포함되어 있고, target_imgs가 비어있다면 422 에러가 발생하므로 사전에 차단 처리.
+        if is_remote and provider == "fal_ai":
+            api_uri = self._active_model_config.get("api_model_uri", "").lower()
+            needs_image = any(kw in api_uri for kw in ["image", "inpainting", "controlnet", "mask"])
+            
+            if needs_image and not target_imgs:
+                QMessageBox.warning(self, "이미지 누락", "선택하신 API 모델은 입력 이미지가 필수입니다.\n'Use Image' 체크박스를 확인하거나 이미지를 로드해주세요.")
+                return
 
         self._stop_worker('worker')
         self._cancel_event.clear()
@@ -2086,8 +2122,9 @@ class BgComposerApp(QMainWindow):
             raise RuntimeError(str(e))
 
     def call_fal_ai_api(self, *, model_id, pil_images, prompt, num_inference_steps, guidance_scale, seed=None, token, use_queue=True, **kwargs):
-        """ Fal-AI API 호출: 큐(Queue) 방식 추론에 맞춘 상태 폴링(Polling) 로직 수정 적용
+        """Fal-AI API 호출: 큐(Queue) 방식 추론에 맞춘 상태 폴링(Polling) 로직 수정 적용
             - 400 에러(Request is still in progress) 방지를 위해 response_url 대신 status_url을 먼저 폴링하여 작업 완료를 대기하도록 개선.
+            - 422 에러(At least one input image) 방지를 위해 pil_images 존재 여부에 따라 payload 동적 구성.
         """
         if not token:
             raise RuntimeError("Fal-AI API Key가 누락되었습니다. 설정에서 API 키를 확인해주세요.")
@@ -2112,13 +2149,17 @@ class BgComposerApp(QMainWindow):
             b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
             return f"data:image/png;base64,{b64}"
 
+        # 수정사항: 422 에러 방지를 위해 기본 payload를 먼저 구성
         payload = {
             "prompt": final_prompt,
-            "image_urls": [encode_to_b64_dataurl(img) for img in pil_images],
             "num_inference_steps": num_inference_steps,
             "guidance_scale": guidance_scale,
             "seed": seed if seed is not None else random.randint(0, 2**32 - 1),
         }
+
+        # 수정사항: pil_images에 실제 이미지가 있을 때만 image_urls 필드 추가 (빈 배열 전송 방지)
+        if pil_images:
+            payload["image_urls"] = [encode_to_b64_dataurl(img) for img in pil_images]
 
         headers = {
             "Authorization": f"Bearer {token}",
