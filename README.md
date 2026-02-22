@@ -42,3 +42,16 @@ pip install hf-xet opencv-python
 
 ## 📜 라이선스
 
+##rag
+1. 라이브러리 설치
+pip install sentence-transformers faiss-cpu numpy
+
+2. 실행 (임베딩 모델 최초 1회 다운 할수도 -> 인터넷 필요) // 경로 확인 할 것
+
+==
+
+1. 라이브러리 (제미나이) 설치
+
+pip install -U sentence-transformers faiss-cpu numpy google-genai
+
+
