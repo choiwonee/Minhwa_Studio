@@ -52,6 +52,7 @@ from utils.common import save_image_file, get_output_dir, qimage_from_ndarray, S
 from utils.translator import translator
 from models.diffusion_estimator import DiffusionEstimator
 from utils.gui_utils import GenericWorker, FloatingToolBar, ImageCanvas, ProcessingOverlay, VisualCameraWidget, KeySettingsDialog
+from utils.rag_prompter import RAGPrompter
 
 # HF Client 캐시
 HF_CLIENT_CACHE = {}
@@ -218,6 +219,11 @@ class BgComposerApp(QMainWindow):
         self.log(f"System Ready. Models: {len(self.generation_models_dict)}")
         self.update_gallery()
         self.apply_smart_defaults()
+
+        # --- RAG 초기화 추가 ---
+        self.rag_prompter = RAGPrompter()
+        threading.Thread(target=self.rag_prompter.build_index, daemon=True).start()
+        # -----------------------
         
         self.blink_timer = QTimer(self)
         self.blink_timer.setInterval(600)
@@ -804,11 +810,20 @@ class BgComposerApp(QMainWindow):
         trans_tool = QHBoxLayout()
         self.chk_translate = QCheckBox("use Trans(Ko→En)")
         self.chk_translate.setChecked(True)
+        
+        # --- RAG 체크박스 추가 ---
+        self.chk_use_rag = QCheckBox("🪄 민화 최적화(RAG)")
+        self.chk_use_rag.setStyleSheet("color: #f39c12; font-weight: bold;")
+        self.chk_use_rag.setToolTip("한글 입력 후 'view Result'를 누르면 AI가 민화풍 프롬프트로 자동 최적화합니다.")
+        # -------------------------
+
         self.btn_view_trans = QPushButton("view Result")
         self.btn_view_trans.setToolTip("입력된 프롬프트를 지금 바로 번역해서 결과 보기")
         self.btn_view_trans.clicked.connect(self.on_translate_requested)
         
         trans_tool.addWidget(self.chk_translate)
+        trans_tool.addSpacing(10)
+        trans_tool.addWidget(self.chk_use_rag) # RAG 추가됨
         trans_tool.addSpacing(15)
         trans_tool.addWidget(self.btn_view_trans)
         trans_tool.addStretch()
@@ -1558,9 +1573,22 @@ class BgComposerApp(QMainWindow):
     def _run_preview_translation(self, p, n):
         self._blink_state = True
         self.blink_timer.start()
-        self.txt_trans_result.setPlainText("Translating...")
+        self.txt_trans_result.setPlainText("Processing...")
         self._stop_worker('preview_worker')
-        self.preview_worker = GenericWorker(lambda p, n, **k: (translator.translate(p), translator.translate(n)), p, n, abort_check=lambda: False)
+        
+        # --- RAG 모드가 켜져있을 때 ---
+        if self.chk_use_rag.isChecked():
+            api_key = token_key.get_valid_api_key()
+            if not api_key:
+                self.txt_trans_result.setPlainText("Error: RAG 기능을 사용하려면 Google API Key가 필요합니다.")
+                self.blink_timer.stop()
+                return
+            self.txt_trans_result.setPlainText("Processing... (RAG 스타일 최적화 중)")
+            self.preview_worker = GenericWorker(self.rag_prompter.generate_enhanced_prompt, user_input=p, api_key=api_key, abort_check=lambda: False)
+        # --- 단순 번역일 때 ---
+        else:
+            self.preview_worker = GenericWorker(lambda p, n, **k: (translator.translate(p), translator.translate(n)), p, n, abort_check=lambda: False)
+            
         self.preview_worker.signal_finished.connect(self._on_preview_translation_done)
         self.preview_worker.finished.connect(lambda: self._stop_worker('preview_worker'))
         self.preview_worker.start()
@@ -1570,11 +1598,22 @@ class BgComposerApp(QMainWindow):
         if not res:
             self.txt_trans_result.setPlainText("Failed.")
             return
-        p_en, n_en = res
-        self.chk_manual_prompt.isChecked()
-        
-        # 간소화된 프롬프트 뷰어
-        self.txt_trans_result.setHtml(f"<b>P:</b> {p_en}<br><b>N:</b> {n_en}")
+            
+        # RAG 결과 (Dict) 처리 - 프롬프트 자동 교체
+        if isinstance(res, dict):
+            p_en = res.get("positive", "")
+            n_en = res.get("negative", "")
+            
+            # 사용자가 번거롭지 않게 입력창에 바로 결과를 덮어씌워 줌
+            self.txt_prompt.setPlainText(p_en)
+            if n_en:
+                self.txt_negative.setPlainText(n_en)
+                
+            self.txt_trans_result.setHtml(f"<b style='color:#f39c12'>[🪄 RAG 최적화 적용 완료]</b><br><b>P:</b> {p_en}<br><b>N:</b> {n_en}")
+        # 단순 번역 결과 (Tuple) 처리
+        else:
+            p_en, n_en = res
+            self.txt_trans_result.setHtml(f"<b>P:</b> {p_en}<br><b>N:</b> {n_en}")
 
     def update_word_counts(self, *args):
         model_key = self.combo_model.currentData()
@@ -1748,6 +1787,13 @@ class BgComposerApp(QMainWindow):
         if self.chk_manual_prompt.isChecked():
             p_txt, n_txt = p_raw, n_raw
         else:
+            # --- RAG 사용자 실수 방지 로직 추가 ---
+            import re
+            if self.chk_use_rag.isChecked() and re.search(r'[가-힣]', p_raw):
+                QMessageBox.information(self, "RAG 최적화 안내", "RAG 최적화가 켜져 있습니다.\n먼저 [view Result] 버튼을 눌러 영문 프롬프트로 변환해주세요.")
+                return
+            # -------------------------------------
+
             if self.chk_translate.isChecked():
                 p_txt = translator.translate(p_raw)
                 n_txt = translator.translate(n_raw)

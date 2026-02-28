@@ -29,3 +29,7 @@ basicsr>=1.4.2
 # --- Optional (API Key Support) ---
 pycryptodome>=3.23.0
 google-genai>=1.60.0
+
+# --- RAG Features ---
+sentence-transformers>=2.7.0
+faiss-cpu>=1.8.0
