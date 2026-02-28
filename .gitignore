@@ -73,6 +73,12 @@ Thumbs.db
 # '이름.숫자2개.md' 형식 무시 (예: xxx.01.md)
 *.[0-9][0-9].md
 
+# '이름.숫자2개.json' 형식 무시 (예: xxx.01.json)
+*.[0-9][0-9].json
+
+# '이름.숫자2개.jsonl' 형식 무시 (예: xxx.01.json)
+*.[0-9][0-9].jsonl
+
 # 로컬 실행 weight 파일 무시
 utils/weights/
 

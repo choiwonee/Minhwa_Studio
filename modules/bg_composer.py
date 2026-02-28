@@ -53,6 +53,8 @@ from utils.translator import translator
 from models.diffusion_estimator import DiffusionEstimator
 from utils.gui_utils import GenericWorker, FloatingToolBar, ImageCanvas, ProcessingOverlay, VisualCameraWidget, KeySettingsDialog
 from utils.rag_prompter import RAGPrompter
+from utils.prompt_engine import PromptEngine
+from utils.config_loader import config
 
 # HF Client 캐시
 HF_CLIENT_CACHE = {}
@@ -225,6 +227,8 @@ class BgComposerApp(QMainWindow):
         threading.Thread(target=self.rag_prompter.build_index, daemon=True).start()
         # -----------------------
         
+        self.prompt_engine = PromptEngine()
+
         self.blink_timer = QTimer(self)
         self.blink_timer.setInterval(600)
         self.blink_timer.timeout.connect(self._update_blinking_message)
@@ -439,6 +443,8 @@ class BgComposerApp(QMainWindow):
         self.mask_canvas = ImageCanvas(self)
         self.mask_canvas.set_mode("view")
         self.mask_canvas.setStyleSheet("background-color: #141414;")
+
+        self.mask_canvas.set_show_crosshair(False)
         
         content_layout.addWidget(self.mask_canvas, 1)
         ctrl_bar = self._create_view_control_bar(self.mask_canvas, show_pan=False)
@@ -454,6 +460,9 @@ class BgComposerApp(QMainWindow):
         
         self.result_canvas = ImageCanvas(self)
         self.result_canvas.set_mode("pan") 
+
+        self.result_canvas.set_show_crosshair(False)
+
         content_layout.addWidget(self.result_canvas, 1) 
         
         btn_save = QPushButton("Save Image")
@@ -483,6 +492,11 @@ class BgComposerApp(QMainWindow):
         self.camera_controller = VisualCameraWidget()
         if hasattr(self.camera_controller, 'sig_prompt_changed'):
             self.camera_controller.sig_prompt_changed.connect(self.on_camera_prompt_update)
+
+        self.camera_scroll_area = QScrollArea()
+        self.camera_scroll_area.setWidget(self.camera_controller)
+        self.camera_scroll_area.setWidgetResizable(True) # 크기 유동적 조절 허용
+        self.camera_scroll_area.setFrameShape(QFrame.NoFrame)
             
         self.gallery_list = QListWidget()
         self.gallery_list.setViewMode(QListWidget.IconMode)
@@ -549,7 +563,7 @@ class BgComposerApp(QMainWindow):
         lb.setContentsMargins(8, 8, 8, 8)
         lb.setSpacing(8)
 
-        # 1. 모델 모드 & 타입
+        # 1. 모델 모드
         grp_mode = QWidget()
         l_mode = QHBoxLayout(grp_mode)
         l_mode.setContentsMargins(0,0,0,0)
@@ -564,20 +578,6 @@ class BgComposerApp(QMainWindow):
         l_mode.addWidget(QLabel("Mode:"))
         l_mode.addWidget(self.rb_local)
         l_mode.addWidget(self.rb_remote)
-        
-        # 구분선
-        line = QFrame(); line.setFrameShape(QFrame.VLine); line.setFrameShadow(QFrame.Sunken); line.setStyleSheet("color:#555")
-        l_mode.addWidget(line)
-        
-        # Type
-        self.bg_type = QButtonGroup(self)
-        self.rb_i2i = QRadioButton("I2I") # Image to Image
-        self.rb_t2i = QRadioButton("T2I") # Text to Image
-        self.bg_type.addButton(self.rb_i2i); self.bg_type.addButton(self.rb_t2i)
-        self.rb_i2i.setChecked(True)
-        l_mode.addWidget(QLabel("Type:"))
-        l_mode.addWidget(self.rb_i2i)
-        l_mode.addWidget(self.rb_t2i)
         l_mode.addStretch()
         
         self.btn_token_conf = QPushButton("API Key")
@@ -588,7 +588,6 @@ class BgComposerApp(QMainWindow):
         l_mode.addWidget(self.btn_token_conf)
 
         self.bg_mode.buttonClicked.connect(self.update_model_list)
-        self.bg_type.buttonClicked.connect(self.update_model_list)
         lb.addWidget(grp_mode)
 
         # 2. 모델 선택 (Grid)
@@ -664,16 +663,28 @@ class BgComposerApp(QMainWindow):
         # Multi-Image
         self.multi_image_group = QGroupBox("Multi-Image"); self.multi_image_group.setVisible(False)
         m_lay = QHBoxLayout(self.multi_image_group); m_lay.setContentsMargins(4,4,4,4)
-        self.list_multi_imgs = QListWidget(); self.list_multi_imgs.setFixedHeight(40)
         
+        # --- (수정) 멀티이미지 리스트를 갤러리 썸네일 스타일로 변경 ---
+        self.list_multi_imgs = QListWidget()
+        self.list_multi_imgs.setFixedHeight(75) # 목록 높이 넉넉하게 확장
+        self.list_multi_imgs.setViewMode(QListWidget.IconMode) # 아이콘(썸네일) 뷰 모드
+        self.list_multi_imgs.setIconSize(QSize(50, 50)) # 썸네일 크기 설정
+        self.list_multi_imgs.setResizeMode(QListWidget.Adjust)
+        self.list_multi_imgs.setSpacing(5)
+        self.list_multi_imgs.setStyleSheet("background: #252525; border: 1px solid #444;")
+        # --------------------------------------------------------------
+        
+        # 버튼을 위아래로 배치하기 위해 세로 레이아웃(VBox) 사용
+        btn_vlay = QVBoxLayout()
         self.btn_add_mi = QPushButton("Add")
         self.btn_del_mi = QPushButton("Del")
         self.btn_add_mi.clicked.connect(self.add_multi_images)
         self.btn_del_mi.clicked.connect(self.del_multi_images)
+        btn_vlay.addWidget(self.btn_add_mi)
+        btn_vlay.addWidget(self.btn_del_mi)
         
         m_lay.addWidget(self.list_multi_imgs)
-        m_lay.addWidget(self.btn_add_mi)
-        m_lay.addWidget(self.btn_del_mi)
+        m_lay.addLayout(btn_vlay)
         lb.addWidget(self.multi_image_group)
         
         lb.addStretch()
@@ -797,52 +808,47 @@ class BgComposerApp(QMainWindow):
 
         # 3. 하단 액션 바
         action_box = QWidget()
-        action_layout = QHBoxLayout(action_box)
+        # (수정) 전체 뼈대를 세로(QVBoxLayout)로 변경하여 상단(체크박스) / 하단(텍스트창+생성버튼)으로 분리
+        action_layout = QVBoxLayout(action_box)
         action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(8)
+        action_layout.setSpacing(4)
         
-        # 번역 컨트롤
-        trans_area = QWidget()
-        trans_layout = QVBoxLayout(trans_area)
-        trans_layout.setContentsMargins(0,0,0,0)
-        trans_layout.setSpacing(2)
-        
+        # 상단: 번역/RAG 컨트롤 툴바
         trans_tool = QHBoxLayout()
         self.chk_translate = QCheckBox("use Trans(Ko→En)")
         self.chk_translate.setChecked(True)
         
-        # --- RAG 체크박스 추가 ---
         self.chk_use_rag = QCheckBox("🪄 민화 최적화(RAG)")
         self.chk_use_rag.setStyleSheet("color: #f39c12; font-weight: bold;")
         self.chk_use_rag.setToolTip("한글 입력 후 'view Result'를 누르면 AI가 민화풍 프롬프트로 자동 최적화합니다.")
-        # -------------------------
 
         self.btn_view_trans = QPushButton("view Result")
-        self.btn_view_trans.setToolTip("입력된 프롬프트를 지금 바로 번역해서 결과 보기")
+        self.btn_view_trans.setToolTip("입력된 프롬프트를 지금 바로 번역/최적화해서 결과 보기")
         self.btn_view_trans.clicked.connect(self.on_translate_requested)
         
         trans_tool.addWidget(self.chk_translate)
         trans_tool.addSpacing(10)
-        trans_tool.addWidget(self.chk_use_rag) # RAG 추가됨
+        trans_tool.addWidget(self.chk_use_rag) 
         trans_tool.addSpacing(15)
         trans_tool.addWidget(self.btn_view_trans)
         trans_tool.addStretch()
         
+        # 하단: 텍스트 창 + GENERATE 버튼 가로 정렬
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(8)
+
         self.txt_trans_result = QTextEdit()
         self.txt_trans_result.setReadOnly(True)
-        self.txt_trans_result.setFixedHeight(60)
-        self.txt_trans_result.setPlaceholderText("번역 결과가 여기에 표시됩니다.")
+        self.txt_trans_result.setFixedHeight(55) # 높이 살짝 조정
+        self.txt_trans_result.setPlaceholderText("변환 결과가 여기에 표시됩니다.")
         self.txt_trans_result.setStyleSheet("background: #1e1e1e; color: #888; border: 1px solid #3d3d3d; font-size: 10px; font-family: Consolas;")
         
         self.chk_translate.toggled.connect(self.txt_trans_result.setEnabled)
         self.chk_translate.toggled.connect(self.update_word_counts)
         
-        trans_layout.addLayout(trans_tool)
-        trans_layout.addWidget(self.txt_trans_result)
-        
-        # 생성 버튼
         self.btn_gen = QPushButton("GENERATE")
-        self.btn_gen.setFixedSize(100, 55)
+        self.btn_gen.setFixedSize(100, 55) # 텍스트 창과 높이(55) 맞춤
         self.btn_gen.setCursor(Qt.PointingHandCursor)
         self.btn_gen.setStyleSheet("""
             QPushButton { 
@@ -857,8 +863,11 @@ class BgComposerApp(QMainWindow):
         self.btn_gen.clicked.connect(self.run_generation)
         self._setup_btn_feedback(self.btn_gen)
 
-        action_layout.addWidget(trans_area, 1)
-        action_layout.addWidget(self.btn_gen, 0)
+        bottom_row.addWidget(self.txt_trans_result, 1) # 텍스트 창은 길게 늘어남
+        bottom_row.addWidget(self.btn_gen, 0)          # 버튼은 고정 크기 유지
+        
+        action_layout.addLayout(trans_tool)
+        action_layout.addLayout(bottom_row)
         
         rp.addWidget(action_box)
 
@@ -872,7 +881,9 @@ class BgComposerApp(QMainWindow):
         files, _ = QFileDialog.getOpenFileNames(self, "Select Images", "", "Images (*.png *.jpg *.jpeg)")
         if files:
             for f in files:
-                self.list_multi_imgs.addItem(f)
+                item = QListWidgetItem(QIcon(f), os.path.basename(f))
+                item.setData(Qt.UserRole, f)
+                self.list_multi_imgs.addItem(item)
                 self.multi_images.append(f)
 
     def del_multi_images(self):
@@ -1051,6 +1062,24 @@ class BgComposerApp(QMainWindow):
         btn_clr.setProperty("simple_btn", "true")
         btn_clr.clicked.connect(self.clear_input_mask)
         layout.addWidget(btn_clr)
+
+        row_view_btns = QHBoxLayout()
+        row_view_btns.setContentsMargins(0, 4, 0, 0)
+        row_view_btns.setSpacing(6)
+        
+        btn_fit_t = QPushButton("Fit")
+        btn_fit_t.setProperty("simple_btn", "true")
+        btn_fit_t.setToolTip("창 크기에 맞춤")
+        btn_fit_t.clicked.connect(self.input_canvas.fit_to_window)
+        
+        btn_act_t = QPushButton("1:1")
+        btn_act_t.setProperty("simple_btn", "true")
+        btn_act_t.setToolTip("실제 크기로 보기")
+        btn_act_t.clicked.connect(self.input_canvas.set_actual_size)
+        
+        row_view_btns.addWidget(btn_fit_t)
+        row_view_btns.addWidget(btn_act_t)
+        layout.addLayout(row_view_btns)
 
         self.toolbar.show()
         self.toolbar.move(20, 20)
@@ -1467,7 +1496,6 @@ class BgComposerApp(QMainWindow):
         prev = self.combo_model.currentData()
         self.combo_model.clear()
         mode = "remote" if self.rb_remote.isChecked() else "local"
-        mtype = "image_to_image" if self.rb_i2i.isChecked() else "text_to_image"
         
         models = []
         for k, v in self.generation_models_dict.items():
@@ -1476,8 +1504,8 @@ class BgComposerApp(QMainWindow):
             
             imode = v.get("mode", "local")
             if (mode=="local" and imode in ["local","both"]) or (mode=="remote" and imode in ["remote","both"]):
-                if v.get("category", "general") == mtype:
-                    models.append(v)
+                # --- (수정) mtype(T2I/I2I) 검사 로직 삭제, 모든 모델 표시 ---
+                models.append(v)
         
         models.sort(key=lambda x: (not x.get('is_default', False), x['short_name']))
         for m in models:
@@ -1735,15 +1763,13 @@ class BgComposerApp(QMainWindow):
         self.btn_view_trans.setEnabled(not checked)
 
     def on_multi_angle_toggled(self, checked):
-        """ 다각도 카메라 제어 체크박스 상태 변경 핸들러
-            - 체크 시 Camera 탭을 가장 앞(0번 인덱스)에 추가하고 포커스 이동
-            - 체크 해제 시 해당 탭 제거
-        """
-        idx = self.tabs.indexOf(self.camera_controller)
+        """ 다각도 카메라 제어 체크박스 상태 변경 핸들러 """
+        # --- (수정) controller 대신 scroll_area 단위로 탭에 추가/제거 ---
+        idx = self.tabs.indexOf(self.camera_scroll_area)
         
         if checked and idx == -1: 
-            self.tabs.insertTab(0, self.camera_controller, "Camera")
-            self.tabs.setCurrentIndex(0) # 탭이 나타나면 즉시 활성화하여 보여줌
+            self.tabs.insertTab(0, self.camera_scroll_area, "Camera")
+            self.tabs.setCurrentIndex(0) 
         elif not checked and idx != -1: 
             self.tabs.removeTab(idx)
 
@@ -1783,30 +1809,27 @@ class BgComposerApp(QMainWindow):
         p_raw = self.txt_prompt.toPlainText().strip()
         n_raw = self.txt_negative.toPlainText().strip()
         
-        # Manual Mode면 번역 스킵
-        if self.chk_manual_prompt.isChecked():
-            p_txt, n_txt = p_raw, n_raw
-        else:
-            # --- RAG 사용자 실수 방지 로직 추가 ---
-            import re
-            if self.chk_use_rag.isChecked() and re.search(r'[가-힣]', p_raw):
-                QMessageBox.information(self, "RAG 최적화 안내", "RAG 최적화가 켜져 있습니다.\n먼저 [view Result] 버튼을 눌러 영문 프롬프트로 변환해주세요.")
-                return
-            # -------------------------------------
+        # --- RAG 사용자 실수 방지 로직 (유지) ---
+        import re
+        if self.chk_use_rag.isChecked() and re.search(r'[가-힣]', p_raw):
+            QMessageBox.information(self, "RAG 최적화 안내", "RAG 최적화가 켜져 있습니다.\n먼저 [view Result] 버튼을 눌러 영문 프롬프트로 변환해주세요.")
+            return
+        # -------------------------------------
 
-            if self.chk_translate.isChecked():
-                p_txt = translator.translate(p_raw)
-                n_txt = translator.translate(n_raw)
-            else:
-                p_txt, n_txt = p_raw, n_raw
-                
-            # 태그 변환 (제미나이 등 모델별 Provider 분기 처리 추가)
-            if self.chk_multi_angle.isChecked() and "<camera>" in p_raw:
-                provider = self._active_model_config.get("provider", "")
-                if provider == "google_genai":
-                    p_txt = self._convert_camera_tag_for_gemini(p_txt)
-                else:
-                    p_txt = self._convert_camera_tag_to_sks(p_txt)
+        # --- (수정) 프롬프트 엔진을 통한 통합 처리 ---
+        # RAG가 켜져있다면 텍스트 창에 이미 완벽한 영어가 들어있으므로, 
+        # 이중 번역으로 인한 프롬프트 훼손을 막기 위해 번역기를 강제로 끕니다.
+        need_translation = self.chk_translate.isChecked() and not self.chk_use_rag.isChecked()
+        
+        p_txt, n_txt = self.prompt_engine.process(
+            p_raw=p_raw,
+            n_raw=n_raw,
+            manual_mode=self.chk_manual_prompt.isChecked(),
+            multi_angle=self.chk_multi_angle.isChecked(),
+            model_cfg=self._active_model_config,
+            use_translator=need_translation  # <--- 추가됨!
+        )
+        # --------------------------------------------
 
         final_rgb = self.image[:,:,:3] if (self.chk_use_image.isChecked() and self.image is not None) else None
         final_mask = self.generate_mask_from_canvas() if (final_rgb is not None and self.chk_use_mask.isChecked()) else None
@@ -1945,23 +1968,41 @@ class BgComposerApp(QMainWindow):
     def _on_cfg_manually_changed(self): self._user_touched_cfg = True
     def _update_blinking_message(self): pass
 
-    def on_worker_error(self, e):
-        """ 워커 실행 중 예외 발생 시 호출: 로딩창을 닫고 경고창 표시 """
-        self.toggle_loading(False) # 1. 무조건 로딩 창 중지
-        err_msg = str(e)
+    def on_worker_error(self, err_msg):
+        """ 백그라운드 워커에서 에러 발생 시 UI 복구 및 안전 필터 예외 처리 """
+        self.blink_timer.stop()
+        self.toggle_loading(False)
+        self.btn_gen.setText("GENERATE")
+        self._set_ui_enabled(True)
         
-        # 2. 에러 유형별 맞춤 알림
-        if "안전 정책" in err_msg or "Safety" in err_msg or "POLICY" in err_msg:
-            title = "콘텐츠 차단 알림"
-            icon = QMessageBox.Warning
+        # --- (추가) 안전 필터(NSFW) 및 특수 에러의 우아한 처리 ---
+        err_lower = str(err_msg).lower()
+        
+        # 1. 안전 필터(NSFW) / 비윤리적 콘텐츠 차단 감지
+        if any(kw in err_lower for kw in ["safety", "nsfw", "policy", "blocked", "content is not allowed", "inappropriate", "violation"]):
+            QMessageBox.warning(
+                self, 
+                "⚠️ 안전 필터 감지", 
+                "입력하신 프롬프트나 이미지가 AI 안전 정책(NSFW/비윤리적 콘텐츠)에 의해 차단되었습니다.\n내용을 수정하신 후 다시 시도해주세요."
+            )
+        # 2. API 호출 횟수 제한(Rate Limit) 감지
+        elif "rate limit" in err_lower or "429" in err_lower or "quota" in err_lower:
+            QMessageBox.warning(
+                self, 
+                "⏳ API 호출 제한", 
+                "API 무료 호출 한도를 초과했거나 요청이 너무 많습니다.\n잠시 후 다시 시도해주세요."
+            )
+        # 3. 인증(API Key) 오류 감지
+        elif "401" in err_lower or "unauthorized" in err_lower or "invalid api key" in err_lower:
+            QMessageBox.warning(
+                self, 
+                "🔑 인증 오류", 
+                "API Key가 유효하지 않습니다.\n상단의 [API Key] 버튼을 눌러 정확한 키를 입력해주세요."
+            )
+        # 4. 그 외 일반적인 에러
         else:
-            title = "실행 오류"
-            icon = QMessageBox.Critical
-            
-        QMessageBox(icon, title, f"작업을 완료할 수 없습니다.\n\n사유: {err_msg}", QMessageBox.Ok, self).exec()
-        
-        # 3. 로그 기록 및 탭 이동
-        self.log(f"Error: {err_msg}", switch_tab=True)
+            QMessageBox.critical(self, "❌ 생성 오류", f"이미지 생성 중 오류가 발생했습니다:\n{err_msg}")
+        # --------------------------------------------------------
 
     def save_result(self):
         if self.result_image is None: return

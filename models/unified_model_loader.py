@@ -25,21 +25,16 @@ except ImportError:
 # Unified Model Loader 클래스
 # -----------------------------------------------------------------------------
 class UnifiedModelLoader:
-    def __init__(self, device: str, hw_info: Dict, hf_token: Optional[str] = None):
+    def __init__(self, config=None, precision="auto", quantization="auto", device=None, hw_info=None, hf_token=None, **kwargs):
         """ 통합 모델 로더 초기화 """
         self.device = device
-        self.hw_info = hw_info
+        self.hw_info = hw_info or {}
         self.hf_token = hf_token
         
-        project_root = Path(__file__).parent.parent.absolute()
-        
-        if config and getattr(config, "weights_path", None):
-            raw_path = config.weights_path
-            if not os.path.isabs(raw_path):
-                self.base_dir = (project_root / raw_path.replace("./", "")).resolve()
-            else:
-                self.base_dir = Path(raw_path)
+        if config and hasattr(config, "weights_dir"):
+            self.base_dir = config.weights_dir
         else:
+            project_root = Path(__file__).parent.parent.absolute()
             self.base_dir = project_root / "models" / "weights"
             
         self.base_dir.mkdir(parents=True, exist_ok=True)
