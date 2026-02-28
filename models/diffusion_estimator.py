@@ -250,51 +250,52 @@ class DiffusionEstimator:
         self._post_inference_cleanup()
         
         p_type = self.model_info.get('pipeline_type', '').lower()
-        str(self.model_info.get('repo_id', '')).lower()
+        # [수정 2번 완료] 의미 없이 소문자로 바꾸기만 하던 좀비 코드(str(self.model_info...)) 삭제됨
         
-        # 1. Qwen 격리 로직 (로컬 실행 시)
         is_qwen = "qwen" in p_type
-        if is_qwen and not kwargs.get("is_remote", False):
-            # Qwen은 격리된 메서드에서 실행
-            return self._predict_qwen_isolated(
-                self.pipeline,
-                image=image,
-                prompt=prompt,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                abort_check=abort_check,
-                **kwargs
-            )
-        
-        # 2. 일반 모델 (DreamShaper 등) 실행 로직
         res_mode = kwargs.get("resolution_mode", "match_input")
         align_unit = 8 # SD 1.5 표준
         
-        pil_img = Image.fromarray(image).convert("RGB") if image is not None else None
-        target_w, target_h = self._calculate_target_dimensions(res_mode, pil_img, align_unit=align_unit)
-
-        # 이미지 리사이징
-        if pil_img is not None:
-            if res_mode == "match_input":
-                pil_img = pil_img.resize((target_w, target_h), Image.LANCZOS)
-            else:
-                pil_img = self._smart_resize_image(pil_img, target_w, target_h)
-        
-        # 마스크 처리 (Inpainting 모델인 경우 필수)
-        pil_mask = None
-        if mask is not None:
-            mask_pil_raw = Image.fromarray(mask).convert("L")
-            if res_mode == "match_input":
-                pil_mask = mask_pil_raw.resize((target_w, target_h), Image.NEAREST)
-            else:
-                pil_mask = self._smart_resize_image(mask_pil_raw, target_w, target_h, method=Image.NEAREST)
-        elif "inpaint" in p_type:
-            # 마스크가 없는데 인페인팅 모델인 경우 -> 전체 마스크 생성
-            pil_mask = Image.new("L", (target_w, target_h), 255)
-
-        kwargs["width"], kwargs["height"] = target_w, target_h
-        
+        # 🚨 [수정 1번 완료] 메모리 누수 방지를 위해 try 블록을 제일 위로 끌어올림
         try:
+            # 1. Qwen 격리 로직 (로컬 실행 시)
+            if is_qwen and not kwargs.get("is_remote", False):
+                # Qwen은 격리된 메서드에서 실행 (실행 후 맨 아래 finally에서 메모리 자동 청소됨)
+                return self._predict_qwen_isolated(
+                    self.pipeline,
+                    image=image,
+                    prompt=prompt,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    abort_check=abort_check,
+                    **kwargs
+                )
+            
+            # 2. 일반 모델 (DreamShaper 등) 실행 로직
+            pil_img = Image.fromarray(image).convert("RGB") if image is not None else None
+            target_w, target_h = self._calculate_target_dimensions(res_mode, pil_img, align_unit=align_unit)
+
+            # 이미지 리사이징
+            if pil_img is not None:
+                if res_mode == "match_input":
+                    pil_img = pil_img.resize((target_w, target_h), Image.LANCZOS)
+                else:
+                    pil_img = self._smart_resize_image(pil_img, target_w, target_h)
+            
+            # 마스크 처리 (Inpainting 모델인 경우 필수)
+            pil_mask = None
+            if mask is not None:
+                mask_pil_raw = Image.fromarray(mask).convert("L")
+                if res_mode == "match_input":
+                    pil_mask = mask_pil_raw.resize((target_w, target_h), Image.NEAREST)
+                else:
+                    pil_mask = self._smart_resize_image(mask_pil_raw, target_w, target_h, method=Image.NEAREST)
+            elif "inpaint" in p_type:
+                # 마스크가 없는데 인페인팅 모델인 경우 -> 전체 마스크 생성
+                pil_mask = Image.new("L", (target_w, target_h), 255)
+
+            kwargs["width"], kwargs["height"] = target_w, target_h
+            
             with torch.inference_mode():
                 # 1. 파이프라인 인자 준비
                 pipeline_args = self._prepare_pipeline_args(pil_img, pil_mask, prompt, negative_prompt, num_inference_steps, guidance_scale, p_type, use_input_image, abort_check, **kwargs)
@@ -309,7 +310,6 @@ class DiffusionEstimator:
                 print(f"[Predict] Running {p_type} | Steps: {num_inference_steps}")
                 
                 # 2. 장치(Device)에 따른 Autocast 설정
-                # self.device가 'cpu'인 경우 'cuda'로 설정하면 오류가 나므로 동적으로 처리합니다.
                 effective_device = "cuda" if "cuda" in str(self.device) else "cpu"
                 
                 if effective_device == "cuda" and not self.hw_info.get("is_pascal", False):
@@ -321,14 +321,15 @@ class DiffusionEstimator:
                 
                 gen_img = res.images[0]
                 
-                # 메모리 정리
+                # 임시 변수 해제
                 del res
-                self._post_inference_cleanup()
 
                 # 후처리 (합성)
                 return self.manual_post_process(gen_img, image, mask, upscale_opts)
         
         finally:
+            # ✅ [가장 중요한 부분] Qwen이든 일반 모델이든, 에러가 나든 안 나든 
+            # 함수가 끝날 때 무조건 VRAM 메모리를 싹 비워줍니다.
             self._post_inference_cleanup()
     
     def _predict_qwen_isolated(self, pipeline, prompt, image, num_inference_steps, guidance_scale, abort_check=None, **kwargs) -> np.ndarray:

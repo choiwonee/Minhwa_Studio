@@ -160,108 +160,80 @@ def _parse_params_from_block(camera_block: str) -> CameraParams:
     return p
 
 # ---------------------------------------------------------------------------
-# 4. 모델별 프롬프트 빌더
+# 4. 모델별 프롬프트 빌더 (구조화 + 실사화 강력 억제)
 # ---------------------------------------------------------------------------
-class _GeminiBuilder:
-    """ Gemini 2.0 / 3.0 이미지 편집 모델 전용 빌더.
-        1) 핵심 설계 근거
-        ──────────────────────────────────────────────────────
-        - Gemini 는 문장 앞쪽 **지시(INSTRUCTION) 동사 구조**에 강하게 반응한다.
-        - 단순 형용사 나열("left side view") 보다 "The camera is physically positioned ... and tilted to ..." 식의 물리적 위치 서술이 구도 반영률을 크게 높인다.
-        - focal length 힌트를 추가하면 Gemini 내부 렌즈 개념과 매핑되어 원근감·피사계 심도가 더 정확해진다.
-        - 앵글 메타 태그([angle: ...])를 별도 줄에 추가하면 모델이 이를 보조 단서(supplementary cue)로 활용한다.
-    """
+def _parse_structured_prompt(text: str) -> Tuple[str, str]:
+    """ 텍스트에서 [INSTRUCTION]과 [STYLE] 블록을 분리해낸다. """
+    if "[INSTRUCTION]" in text and "[STYLE]" in text:
+        parts = text.split("[STYLE]")
+        inst_part = parts[0].replace("[INSTRUCTION]", "").strip()
+        style_part = parts[1].strip()
+        return inst_part, style_part
+    return text.strip(), "" 
 
+# utils/prompt_engine.py 내 빌더 클래스 수정
+
+class _GeminiBuilder:
     def build(self, translated_prompt: str, cam: dict) -> str:
         h, v, z = cam["h"], cam["v"], cam["z"]
         p: CameraParams = cam["params"]
+        inst, style = _parse_structured_prompt(translated_prompt)
+        
+        # 🚨 [조건부 로직] 사용자가 의미 있는 각도 변화를 주었는지 체크 (임계값 5도)
+        has_angle_change = abs(p.horizontal) > 5.0 or abs(p.vertical) > 5.0
+        
+        if has_angle_change:
+            # 각도 변화가 있을 때만 강력한 '카메라 재배치' 명령 하달
+            direction = f"{h['verbose']} and {v['verbose']}"
+            angle_cmd = (
+                f"### PRIMARY TASK: RE-POSITION CAMERA\n"
+                f"Move the viewpoint to a {direction} position. "
+                f"The painting MUST show the subject's {('right' if p.horizontal > 0 else 'left')} side prominently."
+            )
+            meta = f"[angle: {h['tag']}, {v['tag']}, {z['tag']}]"
+            angle_block = f"{angle_cmd}\n{meta}"
+        else:
+            # 변화가 없을 때는 스타일과 내용에 집중하도록 일반적인 구도 묘사만 수행
+            angle_block = f"COMPOSITION: A stable, {z['verbose']} centered frontal view."
 
-        angle_block = self._build_angle_block(h, v, z, p)
-        return f"{angle_block}\n\n{translated_prompt}"
-
-    # 내부 메서드 ──────────────────────────────────────────────────────
-    def _build_angle_block(self, h: dict, v: dict, z: dict, p: CameraParams) -> str:
-        """ 3 레이어 앵글 지시 블록 생성. """
-
-        # L1: 핵심 지시문 (INSTRUCTION 스타일)
-        instruction = (
-            f"CAMERA DIRECTION: Render this scene as {z['verbose']}, "
-            f"captured {h['verbose']}, "
-            f"with a {v['verbose']}. "
-            f"The camera is physically positioned {h['short']} of the subject "
-            f"and tilted to a {v['short']} angle."
-        )
-
-        # Dutch angle
-        roll_note = ""
-        if abs(p.roll) > 5.0:
-            dir_word = "clockwise" if p.roll > 0 else "counter-clockwise"
-            roll_note = f" Apply a {abs(p.roll):.0f}° Dutch angle ({dir_word})."
-
-        # L2: 렌즈/화각 힌트
-        focal    = self._focal_hint(p.zoom)
-        lens_note = f"Use a {focal} lens perspective. Subject framing: {z['short']}."
-
-        # L3: 앵글 메타 태그
-        meta = f"[angle: {h['tag']}, {v['tag']}, {z['tag']}]"
-
-        return f"{instruction}{roll_note}\n{lens_note}\n{meta}"
-
-    @staticmethod
-    def _focal_hint(zoom: float) -> str:
-        """ 줌 값을 35mm 환산 초점거리 힌트로 변환. """
-        if zoom <= 0.6:   return "14–20mm ultra-wide"
-        if zoom <= 0.85:  return "24–28mm wide-angle"
-        if zoom <= 1.15:  return "35–50mm standard"
-        if zoom <= 1.5:   return "85–105mm portrait telephoto"
-        return "200mm+ telephoto compression"
+        style_block = f"\n\n### STYLE & MEDIUM\n{style}" if style else ""
+        return f"{angle_block}\n\n### INSTRUCTION\n{inst}{style_block}"
+    
+    def _get_perspective_desc(self, p: CameraParams) -> str:
+        # 수평 각도에 따른 시각적 변화 서술
+        if abs(p.horizontal) > 20:
+            side = "right" if p.horizontal > 0 else "left"
+            return f"The {side} side of the subject is more visible, creating a 3D volume on the flat paper."
+        return "The subject is centered, emphasizing traditional symmetry."
 
 class _QwenBuilder:
-    """ Qwen-Image-Edit-2511 / Multiple-Angles-LoRA 전용 빌더.
-        1) 핵심 설계 근거
-        ──────────────────────────────────────────────────────
-        - LoRA 트리거 토큰 "<sks>" 를 프롬프트 맨 앞에 배치해야 LoRA 가중치가 올바르게 활성화된다.
-        - Gemini 와 달리 Qwen 은 **묘사(description)** 형식이 더 잘 반영된다.
-        → 구도 단어를 복합 형용사로 인라인 배치.
-        - 수평·수직 각도 수치를 명시(e.g. "45° rotated to the right")하면 LoRA 학습 데이터 패턴과 매핑되어 정확도가 높아진다.
-        - 4단계 표현 → 8분할 표현 전환으로 대각선 구도 누락 해소.
-    """
-
     def build(self, translated_prompt: str, cam: dict, use_sks: bool = True) -> str:
         h, v, z = cam["h"], cam["v"], cam["z"]
         p: CameraParams = cam["params"]
-
-        sks   = "<sks> " if use_sks else ""
-        phrase = self._angle_phrase(h, v, z, p)
-        return f"{sks}{phrase}, {translated_prompt}"
-
-    # 내부 메서드 ──────────────────────────────────────────────────────
-    def _angle_phrase(self, h: dict, v: dict, z: dict, p: CameraParams) -> str:
-        """ 짧고 명확한 구도 묘사 구문 생성. """
-        h_deg = abs(p.horizontal)
-        h_dir = "right" if p.horizontal >= 0 else "left"
-        v_deg = abs(p.vertical)
-        v_dir = "up"    if p.vertical   >= 0 else "down"
-
-        phrase = f"{z['short']} {h['short']} {v['short']} view"
-
-        angle_hint = ""
-        if h_deg > 10.0:
-            angle_hint += f", {h_deg:.0f}° rotated to the {h_dir}"
-        if v_deg > 5.0:
-            angle_hint += f", {v_deg:.0f}° tilted {v_dir}"
-        if abs(p.roll) > 5.0:
-            roll_dir = "clockwise" if p.roll > 0 else "counter-clockwise"
-            angle_hint += f", {abs(p.roll):.0f}° Dutch angle {roll_dir}"
-
-        return phrase + angle_hint
+        sks = "<sks> " if use_sks else ""
+        inst, style = _parse_structured_prompt(translated_prompt)
+        
+        has_angle_change = abs(p.horizontal) > 5.0 or abs(p.vertical) > 5.0
+        
+        if has_angle_change:
+            # 각도를 줬을 때: 변화를 강조하는 헤더 사용
+            h_dir = "right" if p.horizontal >= 0 else "left"
+            header = f"{sks}Angle-shifted {h['short']} {v['short']} view, showing the {h_dir} profile, authentic Korean painting."
+        else:
+            # 각도를 안 줬을 때: 정면성을 강조하는 안정적인 헤더 사용
+            header = f"{sks}Frontal centered view, authentic traditional Korean painting."
+            
+        return f"{header}\nInstruction: {inst}\nStyle: {style}"
 
 class _GenericBuilder:
-    """ 범용 폴백 빌더 (기존 코드와 유사한 단순 묘사형). """
-
     def build(self, translated_prompt: str, cam: dict) -> str:
         h, v, z = cam["h"], cam["v"], cam["z"]
-        return f"{z['short']} {h['short']} {v['short']}, {translated_prompt}"
+        inst, style = _parse_structured_prompt(translated_prompt)
+        
+        # SD 계열
+        if style:
+            return f"(traditional Korean painting:1.3), ({inst}:1.2), ({style}:1.1), {z['short']} {h['short']} {v['short']}"
+        return f"(traditional Korean painting:1.3), {inst}, {z['short']} {h['short']} {v['short']}"
 
 # ---------------------------------------------------------------------------
 # 5. 프롬프트 모드 처리
@@ -367,9 +339,6 @@ class PromptEngine:
             → 번역기가 태그를 손상시키면 match 가 None 을 반환하여 변환이 아무것도 적용되지 않는 문제 발생.
             - 수정: 번역 전 cam_block 을 별도 보존하고, 번역 후 p_txt 에 cam_block 을 붙여서 변환.
         """
-        # 번역된 텍스트 + 원본 <camera> 블록 결합
-        f"{translated_prompt} {cam_block}"
-
         params = _parse_params_from_block(cam_block)
         cam    = classify_camera(params)
 

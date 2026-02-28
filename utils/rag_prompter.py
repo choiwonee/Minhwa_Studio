@@ -118,36 +118,41 @@ class RAGPrompter:
                     
             evidence = "\n\n".join(chunks).strip()[:5200]
 
-            # 4. Gemini 호출 지시문
+            # 4. Gemini 호출 지시문 (구조화된 프롬프트 적용)
             client = genai.Client(api_key=api_key)
             instructions = (
                 "너는 '한국 전통 회화(조선 민화 포함)' 전용 프롬프트 엔지니어다.\n"
-                "너의 최우선 목표는 결과가 반드시 한국 전통 회화 분위기(한지/벽화/비단, 먹선, 담채/석채, 평면 채색)를 유지하는 것이다.\n"
-                "아래 '레시피(근거)'는 규칙이다. 근거에 없는 스타일(동화책/실사/현대)을 추정해서 추가하지 마라.\n"
-                "특히 다음을 절대 금지한다: 동화책/아동 일러스트(kawaii/chibi/patchwork/bedtime/stars/moon), 실사/시네마틱(DSLR/HDR/3D), 텍스트/로고/워터마크, 현대 오브젝트.\n"
+                "너의 최우선 목표는 사용자의 지시를 명확한 '행동(Instruction)'과 '화풍(Style)'으로 분리하여 구조화하는 것이다.\n"
+                "아래 '레시피(근거)'는 규칙이다. 근거에 없는 스타일을 추정해서 추가하지 마라.\n"
+                "다음을 절대 금지한다: 동화책/아동 일러스트, 실사/시네마틱, 텍스트/워터마크, 현대 오브젝트.\n"
                 "출력은 오직 JSON 1개만 반환해라.\n"
                 "JSON 스키마: {\"positive\": \"...\", \"negative\": \"...\"}\n"
-                "- positive: 이미지 생성용 프롬프트(가능하면 영어 토큰 중심, 쉼표로 구분). 한국 고유명은 유지 가능.\n"
+                "- positive: 반드시 [INSTRUCTION]과 [STYLE] 두 구역으로 나누어 작성해라.\n"
+                "  * [INSTRUCTION] 에는 사용자의 원래 요청을 자연스러운 영어 지시문으로 번역.\n"
+                "  * [STYLE] 에는 근거를 바탕으로 한 전통 회화 스타일 키워드들을 쉼표로 나열.\n"
                 "- negative: 금지 요소를 쉼표로 나열.\n"
-                "추가 설명/문장/코드블록을 절대 붙이지 마라.\n"
+                "추가 설명이나 마크다운 코드블록을 절대 붙이지 마라.\n"
+                "중요: 사용자가 카메라 각도를 지정하면, 평면적인 민화 기법을 유지하되\n"
+                "오브젝트의 배치와 원근감을 조절하여 해당 각도를 시각적으로 명확히 표현해라.\n"
+                "특히 다음을 절대 금지한다: 특정 유명 화가나 현대 작가의 이름을 언급하거나 그들의 개별 작품을 복제하는 행위.\n"
+                "결과는 반드시 보편적이고 전형적인 조선 민화의 양식을 따르도록 구성해라.\n"
             )
 
             prompt = (
                 f"[사용자 입력]\n{user_input.strip()}\n\n"
                 f"[레시피(근거) - 반드시 준수]\n{evidence}\n\n"
                 "작업 지시:\n"
-                "1) 근거를 읽고, 사용자 의도에 가장 맞는 '장르/계열'을 1개 선택해라.\n"
-                "2) positive에는 반드시 매체/기법 앵커를 포함해라:\n"
+                "1) 사용자 입력의 핵심 행동을 영어로 번역하여 [INSTRUCTION] 아래에 적어라.\n"
+                "2) [STYLE] 아래에는 반드시 다음 매체/기법 앵커를 포함해라:\n"
                 "   - hanji paper OR aged plaster mural OR silk scroll 중 1개\n"
                 "   - ink brush outlines, mineral pigments, flat color fills, minimal shading\n"
-                "3) positive에는 사용자 입력의 핵심 주제(오브젝트/모티프)를 1~2개만 포함해 과밀을 피하라.\n"
-                "4) negative에는 아래를 반드시 포함해라(그리고 근거에 있는 금지항목도 추가):\n"
-                "   - children’s book, storybook, kawaii, chibi, cartoon, anime, patchwork, bedtime, stars, moon, galaxy, rainbow\n"
+                "3) negative에는 반드시 아래를 포함해라:\n"
+                "   - children’s book, storybook, kawaii, chibi, cartoon, anime, patchwork\n"
                 "   - photorealistic, DSLR, cinematic lighting, HDR, 3D render\n"
-                "   - text, logo, watermark, signature\n"
-                "   - modern objects, city skyline, neon, sci-fi\n"
-                "5) 결과는 JSON만 출력.\n"
-                "\n출력 예시(JSON 형식 그대로):\n{\"positive\":\"...\",\"negative\":\"...\"}\n"
+                "   - text, logo, watermark, signature, modern objects\n"
+                "4) 결과는 JSON만 출력.\n"
+                "\n출력 예시(JSON 형식 그대로):\n"
+                "{\"positive\":\"[INSTRUCTION]\\nChange the background to a spring forest and draw a tiger.\\n[STYLE]\\nTraditional Korean Minhwa, hanji paper, ink brush outlines, flat color fills...\",\"negative\":\"photorealistic, 3D render, text...\"}\n"
             )
             
             response = client.models.generate_content(

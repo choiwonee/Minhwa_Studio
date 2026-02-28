@@ -46,7 +46,6 @@ class UnifiedModelLoader:
         """ 공통 로딩 인자 생성 """
         kwargs = {
             "cache_dir": str(self.base_dir),
-            "resume_download": True
         }
         if self.hf_token:
             kwargs["token"] = self.hf_token
@@ -70,7 +69,7 @@ class UnifiedModelLoader:
     
     def _download_model_file(self, repo_id: str, filename: str, abort_check, subfolder: Optional[str] = None) -> Path:
         print(f"[Loader] Checking/Downloading {filename}...")
-        return Path(hf_hub_download(repo_id=repo_id, filename=filename, subfolder=subfolder,cache_dir=str(self.base_dir), token=self.hf_token, resume_download=True))
+        return Path(hf_hub_download(repo_id=repo_id, filename=filename, subfolder=subfolder,cache_dir=str(self.base_dir), token=self.hf_token))
 
     # -------------------------------------------------------------------------
     # Qwen Helper Methods

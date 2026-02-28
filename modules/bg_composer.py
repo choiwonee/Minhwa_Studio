@@ -49,7 +49,6 @@ if project_root not in sys.path:
 from utils.config_loader import config
 from utils import token_key
 from utils.common import save_image_file, get_output_dir, qimage_from_ndarray, SuppressStderr
-from utils.translator import translator
 from models.diffusion_estimator import DiffusionEstimator
 from utils.gui_utils import GenericWorker, FloatingToolBar, ImageCanvas, ProcessingOverlay, VisualCameraWidget, KeySettingsDialog
 from utils.rag_prompter import RAGPrompter
@@ -1585,6 +1584,11 @@ class BgComposerApp(QMainWindow):
     def on_camera_prompt_update(self, camera_text):
         if not self.chk_multi_angle.isChecked(): return
         current_text = self.txt_prompt.toPlainText()
+        
+        # 🚨 [안전장치] 만약 카메라 텍스트에 <camera> 껍데기가 없다면 강제로 씌워줍니다.
+        if not camera_text.strip().startswith("<camera>"):
+            camera_text = f"<camera>{camera_text}</camera>"
+            
         pattern = r"\s*<camera>.*?</camera>\s*"
         injection_text = f" {camera_text} " 
         if "<camera>" in current_text:
@@ -1613,9 +1617,21 @@ class BgComposerApp(QMainWindow):
                 return
             self.txt_trans_result.setPlainText("Processing... (RAG 스타일 최적화 중)")
             self.preview_worker = GenericWorker(self.rag_prompter.generate_enhanced_prompt, user_input=p, api_key=api_key, abort_check=lambda: False)
-        # --- 단순 번역일 때 ---
+        # --- 단순 번역일 때 (🚨 PromptEngine을 통과시켜 카메라 앵글까지 미리 보여주도록 수정) ---
         else:
-            self.preview_worker = GenericWorker(lambda p, n, **k: (translator.translate(p), translator.translate(n)), p, n, abort_check=lambda: False)
+            def preview_process(**kwargs):
+                # 실제 GENERATE 버튼을 눌렀을 때와 똑같은 과정을 거쳐 미리보기를 생성합니다.
+                p_txt, n_txt = self.prompt_engine.process(
+                    p_raw=p,
+                    n_raw=n,
+                    manual_mode=self.chk_manual_prompt.isChecked(),
+                    multi_angle=self.chk_multi_angle.isChecked(),
+                    model_cfg=self._active_model_config,
+                    use_translator=True
+                )
+                return p_txt, n_txt
+                
+            self.preview_worker = GenericWorker(preview_process, abort_check=lambda: False)
             
         self.preview_worker.signal_finished.connect(self._on_preview_translation_done)
         self.preview_worker.finished.connect(lambda: self._stop_worker('preview_worker'))
@@ -1973,7 +1989,7 @@ class BgComposerApp(QMainWindow):
         self.blink_timer.stop()
         self.toggle_loading(False)
         self.btn_gen.setText("GENERATE")
-        self._set_ui_enabled(True)
+        self.set_ui_enabled(True)
         
         # --- (추가) 안전 필터(NSFW) 및 특수 에러의 우아한 처리 ---
         err_lower = str(err_msg).lower()
