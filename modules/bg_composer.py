@@ -2060,12 +2060,19 @@ class BgComposerApp(QMainWindow):
                 "⚠️ 안전 필터 감지", 
                 "입력하신 프롬프트나 이미지가 AI 안전 정책(NSFW/비윤리적 콘텐츠)에 의해 차단되었습니다.\n내용을 수정하신 후 다시 시도해주세요."
             )
-        # 2. API 호출 횟수 제한(Rate Limit) 감지
+        # 2. 서버 일시 과부하(503) 감지
+        elif "503" in err_lower or "unavailable" in err_lower:
+            QMessageBox.warning(
+                self,
+                "🔄 서버 일시 과부하",
+                "Gemini 서버에 요청이 몰리고 있습니다.\n잠시 후 다시 시도해주세요.\n(보통 30초~1분 이내 해소됩니다)"
+            )
+        # 3. API 호출 횟수 제한(Rate Limit) 감지
         elif "rate limit" in err_lower or "429" in err_lower or "quota" in err_lower:
             QMessageBox.warning(
-                self, 
-                "⏳ API 호출 제한", 
-                "API 무료 호출 한도를 초과했거나 요청이 너무 많습니다.\n잠시 후 다시 시도해주세요."
+                self,
+                "⏱️ API 호출 제한",
+                "API 호출 횟수 제한에 도달했습니다.\n잠시 후 다시 시도하거나, API Key의 사용량을 확인해주세요."
             )
         # 3. 인증(API Key) 오류 감지
         elif "401" in err_lower or "unauthorized" in err_lower or "invalid api key" in err_lower:
@@ -2201,11 +2208,27 @@ class BgComposerApp(QMainWindow):
                 contents.append(mask_img)
                 
         try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(**gen_config_params)
-            )
+            # ── 503/429 재시도 래퍼 (최대 3회, 지수 백오프) ──────────────
+            import time as _time
+            response = None
+            for _attempt in range(3):
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**gen_config_params)
+                    )
+                    break  # 성공 시 루프 탈출
+                except Exception as _retry_err:
+                    _e = str(_retry_err)
+                    _is_retryable = "503" in _e or "UNAVAILABLE" in _e or "429" in _e or "RESOURCE_EXHAUSTED" in _e
+                    if _is_retryable and _attempt < 2:
+                        _wait = 2 ** (_attempt + 1)  # 1차: 2초, 2차: 4초
+                        print(f"[Gemini] 서버 과부하, {_wait}초 후 재시도 ({_attempt + 1}/2)...")
+                        _time.sleep(_wait)
+                    else:
+                        raise  # 재시도 불가 에러이거나 3회 모두 실패 시 상위로 전달
+            # ── 재시도 래퍼 끝 ────────────────────────────────────────────
 
             if not response or not response.candidates:
                 raise RuntimeError("Gemini API: 안전 정책에 의해 차단되었습니다.")

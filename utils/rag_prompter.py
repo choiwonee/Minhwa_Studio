@@ -8,12 +8,11 @@ from utils.config_loader import config
 from sentence_transformers import SentenceTransformer
 from google import genai
 
-import base64
 from io import BytesIO
 from PIL import Image as PILImage
 
 class RAGPrompter:
-    def __init__(self, recipes_filename="recipes_korean_trad_200.jsonl"):
+    def __init__(self, recipes_filename="prompt_recipes.jsonl"):
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.recipes_path = os.path.join(base_dir, recipes_filename)
         
@@ -186,26 +185,22 @@ class RAGPrompter:
             pil_img.thumbnail((512, 512), PILImage.LANCZOS)
             buf = BytesIO()
             pil_img.save(buf, format="JPEG", quality=85)
-            base64.b64encode(buf.getvalue()).decode("utf-8")
 
             client = genai.Client(api_key=api_key)
 
-            # Gemini Vision 분석 프롬프트:
-            # 스타일 묘사 없이 "무엇을 바꿀지"만 뽑아내도록 지시
-            analysis_prompt = (
-                "You are an assistant for editing Korean traditional minhwa (민화) artwork.\n"
-                "Analyze the provided image carefully, then interpret the user's edit request.\n\n"
-                "Rules:\n"
-                "1. Generate ONLY a concise, direct editing instruction for an image-to-image model.\n"
-                "2. Do NOT describe the existing style — the model already sees the image.\n"
-                "3. Do NOT add style anchors, texture descriptions, or negative prompts.\n"
-                "4. Keep 'change' under 40 words.\n"
-                "5. Return ONLY valid JSON, no markdown, no preamble.\n\n"
-                "Output format:\n"
-                '{"change": "<what to change/add/remove in English>", '
-                '"keep": "<critical visual elements to preserve>"}\n\n'
-                f"User request: {user_input.strip()}"
+            # config.ini에서 I2I 분석 지시문 로드 (없으면 fallback)
+            fallback_i2i = (
+                "Analyze the image and the user request. "
+                "Return ONLY JSON: "
+                '{{\"change\": \"<edit instruction>\", \"keep\": \"<elements to preserve>\"}}\n\n'
+                f"User request: {{user_input}}"
             )
+            i2i_template = config.get_config_value(
+                "RAG_Templates", "i2i_instructions", fallback_i2i
+            )
+            analysis_prompt = i2i_template.format(
+                user_input=user_input.strip()
+            ).strip()
 
             # Gemini multimodal API 호출 (이미지 + 텍스트)
             from google.genai import types as genai_types
