@@ -8,6 +8,10 @@ from utils.config_loader import config
 from sentence_transformers import SentenceTransformer
 from google import genai
 
+import base64
+from io import BytesIO
+from PIL import Image as PILImage
+
 class RAGPrompter:
     def __init__(self, recipes_filename="recipes_korean_trad_200.jsonl"):
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -156,3 +160,81 @@ class RAGPrompter:
 
         except Exception as e:
             return {"change": user_input, "negative": f"RAG Error: {e}"}
+        
+    def generate_i2i_instruction(self, user_input: str, image, api_key: str, **kwargs):
+        """I2I 모드 전용 RAG: Gemini Vision으로 입력 이미지를 분석하여
+        instruction-tuned 모델에 전달할 최소한의 편집 지시문만 생성한다.
+        
+        - T2I RAG와 달리 style_anchors/negative 를 주입하지 않음.
+        - 모델이 이미 입력 이미지를 보고 있으므로 스타일은 모델 자체에 위임.
+        - 반환 dict에 mode='i2i' 를 명시하여 PromptEngine 빌더가 분기 처리할 수 있게 함.
+        """
+        if not api_key:
+            return {"mode": "i2i", "change": user_input, "keep": "original style and composition"}
+
+        try:
+            # numpy array → PIL → JPEG base64 변환
+            if isinstance(image, np.ndarray):
+                pil_img = PILImage.fromarray(image[:, :, :3].astype(np.uint8))
+            elif isinstance(image, PILImage.Image):
+                pil_img = image.convert("RGB")
+            else:
+                # 이미지 변환 실패 시 텍스트만으로 폴백
+                return {"mode": "i2i", "change": user_input, "keep": "original style"}
+
+            # API 전송 크기 제한 (512px 이내로 축소 → 비용 및 속도 최적화)
+            pil_img.thumbnail((512, 512), PILImage.LANCZOS)
+            buf = BytesIO()
+            pil_img.save(buf, format="JPEG", quality=85)
+            base64.b64encode(buf.getvalue()).decode("utf-8")
+
+            client = genai.Client(api_key=api_key)
+
+            # Gemini Vision 분석 프롬프트:
+            # 스타일 묘사 없이 "무엇을 바꿀지"만 뽑아내도록 지시
+            analysis_prompt = (
+                "You are an assistant for editing Korean traditional minhwa (민화) artwork.\n"
+                "Analyze the provided image carefully, then interpret the user's edit request.\n\n"
+                "Rules:\n"
+                "1. Generate ONLY a concise, direct editing instruction for an image-to-image model.\n"
+                "2. Do NOT describe the existing style — the model already sees the image.\n"
+                "3. Do NOT add style anchors, texture descriptions, or negative prompts.\n"
+                "4. Keep 'change' under 40 words.\n"
+                "5. Return ONLY valid JSON, no markdown, no preamble.\n\n"
+                "Output format:\n"
+                '{"change": "<what to change/add/remove in English>", '
+                '"keep": "<critical visual elements to preserve>"}\n\n'
+                f"User request: {user_input.strip()}"
+            )
+
+            # Gemini multimodal API 호출 (이미지 + 텍스트)
+            from google.genai import types as genai_types
+            response = client.models.generate_content(
+                model=self.gemini_model,
+                contents=[
+                    genai_types.Content(
+                        role="user",
+                        parts=[
+                            genai_types.Part.from_bytes(
+                                data=buf.getvalue(),
+                                mime_type="image/jpeg"
+                            ),
+                            genai_types.Part.from_text(text=analysis_prompt),
+                        ]
+                    )
+                ]
+            )
+
+            raw = (response.text or "").strip()
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            if m:
+                parsed = json.loads(m.group(0).strip())
+                parsed["mode"] = "i2i"   # ← PromptEngine 분기용 마커
+                return parsed
+
+            # JSON 파싱 실패 시 user_input을 change로 폴백
+            return {"mode": "i2i", "change": user_input, "keep": "original style"}
+
+        except Exception as e:
+            print(f"[RAG] I2I instruction generation failed: {e}")
+            return {"mode": "i2i", "change": user_input, "keep": "original style"}

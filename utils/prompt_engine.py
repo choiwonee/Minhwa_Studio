@@ -193,6 +193,21 @@ class _GeminiBuilder:
         has_angle = abs(p.horizontal) > 0.1 or abs(p.vertical) > 0.1 or abs(p.zoom - 1.0) > 0.05
         cam_text = f"Azimuth: {h['short']}, Elevation: {v['short']}, Distance: {z['short']}" if has_angle else "" # Distance(Zoom), 결과 예: "Azimuth: front view, Elevation: eye-level shot, Distance: medium shot"
 
+        # ── I2I RAG 모드: 이미지 분석 기반 경량 instruction ────────────────
+        # style_anchors/negative 를 주입하지 않고 change + keep 만 사용.
+        # 모델이 입력 이미지를 직접 보고 있으므로 스타일 재지정은 오히려 충돌을 유발함.
+        if rag_data and rag_data.get("mode") == "i2i":
+            change = rag_data.get("change", translated_prompt).strip()
+            keep   = rag_data.get("keep", "").strip()
+            keep_clause = f" Preserve {keep}." if keep else ""
+            if has_angle:
+                return (
+                    f"Redraw from this camera position: {cam_text}. "
+                    f"{change}.{keep_clause}"
+                ).strip()
+            return f"{change}.{keep_clause}".strip()
+        # ── I2I RAG 모드 끝 ──────────────────────────────────────────────
+
         # 💡 보완된 부분: RAG 미사용 시 앵글 단독 지시 처리 강화
         if not rag_data:
             if has_angle:
@@ -265,6 +280,17 @@ class _QwenBuilder:
         else:
             sks = ""
 
+        # ── I2I RAG 모드 ───────────────────────────────────────────────────
+        if rag_data and rag_data.get("mode") == "i2i":
+            change = rag_data.get("change", translated_prompt).strip()
+            keep   = rag_data.get("keep", "").strip()
+            keep_clause = f" strictly keeping {keep} unchanged." if keep else "."
+            if has_angle:
+                angle_phrase = f"{h['short']} {v['short']}" if has_angle else ""
+                return f"{sks}Redraw to {angle_phrase}. {change}{keep_clause}".strip()
+            return f"{sks}{change}{keep_clause}".strip()
+        # ── I2I RAG 모드 끝 ───────────────────────────────────────────────        
+
         # 1. RAG 미사용 시
         if not rag_data:
             if has_angle:
@@ -320,7 +346,13 @@ class _GenericBuilder:
         
         has_angle = abs(p.horizontal) > 0.1 or abs(p.vertical) > 0.1 or abs(p.zoom - 1.0) > 0.05
         angle_str = f"{h['short']} {v['short']} {z['short']}" if has_angle else "" # 결과 예: "front view eye-level shot medium shot"
-        if rag_data:
+        
+        if rag_data and rag_data.get("mode") == "i2i":
+            # I2I 모드: style_anchors 없이 change + keep 만 사용
+            change = rag_data.get("change", translated_prompt)
+            keep   = rag_data.get("keep", "")
+            parts  = [change, f"keep {keep}" if keep else "", angle_str]
+        elif rag_data:
             parts = [rag_data.get('change', translated_prompt), rag_data.get('style_anchors', ''), angle_str]
         else:
             parts = [translated_prompt, angle_str]

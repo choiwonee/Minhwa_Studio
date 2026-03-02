@@ -1623,9 +1623,31 @@ class BgComposerApp(QMainWindow):
                 self.txt_trans_result.setPlainText("RAG 인덱스 로딩 중... 잠시 후 다시 시도해주세요.")
                 self.blink_timer.stop()
                 return
-            self.txt_trans_result.setPlainText("Processing... (RAG 스타일 최적화 중)")
-            self.preview_worker = GenericWorker(self.rag_prompter.generate_enhanced_prompt, user_input=p, api_key=api_key, abort_check=lambda: False)
-        # --- 단순 번역일 때 (🚨 PromptEngine을 통과시켜 카메라 앵글까지 미리 보여주도록 수정) ---
+
+            # I2I 모드 판별: 입력 이미지가 있고 instruction-following 모델일 때만 I2I RAG 사용
+            # DreamShaper(SDInpaint) 는 prompt_style = instruction 이 아니므로 자동으로 T2I RAG 경로 유지
+            _model_cfg = self._active_model_config or {}
+            _is_instruction_model = _model_cfg.get("prompt_style", "") == "instruction"
+            _has_input_image = self.chk_use_image.isChecked() and self.image is not None
+            _use_i2i_rag = _has_input_image and _is_instruction_model
+
+            if _use_i2i_rag:
+                self.txt_trans_result.setPlainText("Processing... (I2I 이미지 분석 중)")
+                self.preview_worker = GenericWorker(
+                    self.rag_prompter.generate_i2i_instruction,
+                    user_input=p,
+                    image=self.image.copy(),   # 복사본 전달 (스레드 안전)
+                    api_key=api_key,
+                    abort_check=lambda: False
+                )
+            else:
+                self.txt_trans_result.setPlainText("Processing... (RAG 스타일 최적화 중)")
+                self.preview_worker = GenericWorker(
+                    self.rag_prompter.generate_enhanced_prompt,
+                    user_input=p,
+                    api_key=api_key,
+                    abort_check=lambda: False
+                )
         else:
             def preview_process(**kwargs):
                 # 실제 GENERATE 버튼을 눌렀을 때와 똑같은 과정을 거쳐 미리보기를 생성합니다.
@@ -1654,19 +1676,30 @@ class BgComposerApp(QMainWindow):
             
         if self.chk_use_rag.isChecked() and isinstance(res, dict):
             # RAG 데이터 캐싱 (Generate 시 활용)
-            self._cached_rag_data = res 
-            
+            self._cached_rag_data = res
+
             # 원문 단순 번역본 확보 (UI 표시용)
             p_en = self.prompt_engine.translate_only(self.txt_prompt.toPlainText())
-            
-            html = f"<b style='color:#f39c12'>[🪄 RAG 템플릿 적용 준비 완료]</b><br>"
-            html += f"<b>원문 번역:</b> {p_en}<br><hr>"
-            html += f"<b>[RAG 분석 결과]</b><br>"
-            html += f"<b>KEEP:</b> {res.get('keep', '')}<br>"
-            html += f"<b>CHANGE:</b> {res.get('change', '')}<br>"
-            html += f"<b>ADD:</b> {res.get('add', '')}<br>"
-            html += f"<b>STYLE:</b> {res.get('style_anchors', '')}<br>"
-            html += f"<b>NEG:</b> {res.get('negative', '')}<br>"
+
+            if res.get("mode") == "i2i":
+                # I2I RAG 결과: 이미지 분석 기반 경량 instruction 표시
+                html  = f"<b style='color:#27ae60'>[🖼️ I2I 이미지 분석 완료]</b><br>"
+                html += f"<b>원문 번역:</b> {p_en}<br><hr>"
+                html += f"<b>[이미지 분석 결과]</b><br>"
+                html += f"<b>CHANGE:</b> {res.get('change', '')}<br>"
+                html += f"<b>KEEP:</b> {res.get('keep', '')}<br>"
+                html += f"<small style='color:#95a5a6'>※ I2I 모드: 스타일 앵커 없이 편집 지시문만 생성됩니다.</small>"
+            else:
+                # T2I RAG 결과: 기존 전체 레시피 표시
+                html  = f"<b style='color:#f39c12'>[🪄 RAG 템플릿 적용 준비 완료]</b><br>"
+                html += f"<b>원문 번역:</b> {p_en}<br><hr>"
+                html += f"<b>[RAG 분석 결과]</b><br>"
+                html += f"<b>KEEP:</b> {res.get('keep', '')}<br>"
+                html += f"<b>CHANGE:</b> {res.get('change', '')}<br>"
+                html += f"<b>ADD:</b> {res.get('add', '')}<br>"
+                html += f"<b>STYLE:</b> {res.get('style_anchors', '')}<br>"
+                html += f"<b>NEG:</b> {res.get('negative', '')}<br>"
+
             self.txt_trans_result.setHtml(html)
         else:
             self._cached_rag_data = None
