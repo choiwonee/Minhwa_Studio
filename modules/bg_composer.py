@@ -2223,7 +2223,7 @@ class BgComposerApp(QMainWindow):
                     _e = str(_retry_err)
                     _is_retryable = "503" in _e or "UNAVAILABLE" in _e or "429" in _e or "RESOURCE_EXHAUSTED" in _e
                     if _is_retryable and _attempt < 2:
-                        _wait = 2 ** (_attempt + 1)  # 1차: 2초, 2차: 4초
+                        _wait = 5 * (2 ** _attempt)
                         print(f"[Gemini] 서버 과부하, {_wait}초 후 재시도 ({_attempt + 1}/2)...")
                         _time.sleep(_wait)
                     else:

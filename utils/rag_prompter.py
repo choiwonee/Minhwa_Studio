@@ -141,11 +141,25 @@ class RAGPrompter:
                 evidence=evidence
             ).strip()
             
-            # Gemini API 호출
-            response = client.models.generate_content(
-                model=self.gemini_model, 
-                contents=f"{instructions}\n\n{prompt}"
-            )
+            # Gemini API 호출 (503/429 재시도 래퍼)
+            import time as _time
+            response = None
+            for _attempt in range(3):
+                try:
+                    response = client.models.generate_content(
+                        model=self.gemini_model,
+                        contents=f"{instructions}\n\n{prompt}"
+                    )
+                    break
+                except Exception as _retry_err:
+                    _e = str(_retry_err)
+                    _is_retryable = "503" in _e or "UNAVAILABLE" in _e or "429" in _e or "RESOURCE_EXHAUSTED" in _e
+                    if _is_retryable and _attempt < 2:
+                        _wait = 5 * (2 ** _attempt)
+                        print(f"[RAG T2I] 서버 과부하, {_wait}초 후 재시도 ({_attempt + 1}/2)...")
+                        _time.sleep(_wait)
+                    else:
+                        raise
             raw = (response.text or "").strip()
             
             m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
@@ -202,23 +216,38 @@ class RAGPrompter:
                 user_input=user_input.strip()
             ).strip()
 
-            # Gemini multimodal API 호출 (이미지 + 텍스트)
+            # Gemini multimodal API 호출 (이미지 + 텍스트, 503/429 재시도 래퍼)
+            import time as _time
             from google.genai import types as genai_types
-            response = client.models.generate_content(
-                model=self.gemini_model,
-                contents=[
-                    genai_types.Content(
-                        role="user",
-                        parts=[
-                            genai_types.Part.from_bytes(
-                                data=buf.getvalue(),
-                                mime_type="image/jpeg"
-                            ),
-                            genai_types.Part.from_text(text=analysis_prompt),
-                        ]
+            _contents = [
+                genai_types.Content(
+                    role="user",
+                    parts=[
+                        genai_types.Part.from_bytes(
+                            data=buf.getvalue(),
+                            mime_type="image/jpeg"
+                        ),
+                        genai_types.Part.from_text(text=analysis_prompt),
+                    ]
+                )
+            ]
+            response = None
+            for _attempt in range(3):
+                try:
+                    response = client.models.generate_content(
+                        model=self.gemini_model,
+                        contents=_contents
                     )
-                ]
-            )
+                    break
+                except Exception as _retry_err:
+                    _e = str(_retry_err)
+                    _is_retryable = "503" in _e or "UNAVAILABLE" in _e or "429" in _e or "RESOURCE_EXHAUSTED" in _e
+                    if _is_retryable and _attempt < 2:
+                        _wait = 5 * (2 ** _attempt)
+                        print(f"[RAG I2I] 서버 과부하, {_wait}초 후 재시도 ({_attempt + 1}/2)...")
+                        _time.sleep(_wait)
+                    else:
+                        raise
 
             raw = (response.text or "").strip()
             m = re.search(r"\{.*\}", raw, re.DOTALL)
