@@ -4,12 +4,7 @@ import torch
 import torch.nn.functional as Func
 from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 import utils.common as COM
-
-import numpy as np
-import torch
-import torch.nn.functional as Func
 from pathlib import Path
-from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
 # [Config] 설정 로더 가져오기
 try:

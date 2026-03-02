@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QComboBox, QMessageBox, QGroupBox,
     QRadioButton, QButtonGroup, QDoubleSpinBox, QScrollBar, QScrollArea, QGridLayout, QTextEdit,
     QCheckBox, QStatusBar, QListWidget, QListWidgetItem, QSizePolicy, QSlider, QSplitter, QTableWidget,
-    QTableWidgetItem, QTabWidget, QSpinBox, QListWidget
+    QTableWidgetItem, QTabWidget, QSpinBox
 )
 from PySide6.QtCore import Qt, QSize, QTimer, QThread, Signal
 from PySide6.QtGui import QFont, QIcon, QImage, QImageReader, QPixmap, QAction

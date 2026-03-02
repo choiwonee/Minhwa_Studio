@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from utils.masking_postprocess import adjust_target_pixel_size
 
 def remove_white_noise_component(image: np.ndarray, invert: bool=False, pixel_limit: bool=True, min_area_ratio: float=0.0005, debug: bool=False) -> np.ndarray:
     """ 연결 요소 분석을 통해 작은 흰색 노이즈 제거 (min_area_ratio 기준). 벡터화 최적화 버전 """
