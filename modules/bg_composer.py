@@ -52,8 +52,7 @@ from utils.common import save_image_file, get_output_dir, qimage_from_ndarray, S
 from models.diffusion_estimator import DiffusionEstimator
 from utils.gui_utils import GenericWorker, FloatingToolBar, ImageCanvas, ProcessingOverlay, VisualCameraWidget, KeySettingsDialog
 from utils.rag_prompter import RAGPrompter
-from utils.prompt_engine import PromptEngine
-from utils.config_loader import config
+from utils.prompt_engine import patch_bg_composer
 
 # HF Client 캐시
 HF_CLIENT_CACHE = {}
@@ -226,8 +225,12 @@ class BgComposerApp(QMainWindow):
         threading.Thread(target=self.rag_prompter.build_index, daemon=True).start()
         # -----------------------
         
-        self.prompt_engine = PromptEngine()
-
+        # PromptEngine 단일 인스턴스로 통일:
+        # patch_bg_composer()가 내부에서 PromptEngine()을 새로 생성해 self._prompt_engine에 저장하므로,
+        # 먼저 patch를 실행한 뒤 self.prompt_engine이 동일 인스턴스를 참조하도록 한다.
+        patch_bg_composer(self)                        # → self._prompt_engine 생성
+        self.prompt_engine = self._prompt_engine       # 동일 인스턴스 참조 (중복 생성 방지)
+        
         self.blink_timer = QTimer(self)
         self.blink_timer.setInterval(600)
         self.blink_timer.timeout.connect(self._update_blinking_message)
@@ -817,7 +820,7 @@ class BgComposerApp(QMainWindow):
         self.chk_translate = QCheckBox("use Trans(Ko→En)")
         self.chk_translate.setChecked(True)
         
-        self.chk_use_rag = QCheckBox("🪄 민화 최적화(RAG)")
+        self.chk_use_rag = QCheckBox("민화 최적화 프롬프트(RAG)")
         self.chk_use_rag.setStyleSheet("color: #f39c12; font-weight: bold;")
         self.chk_use_rag.setToolTip("한글 입력 후 'view Result'를 누르면 AI가 민화풍 프롬프트로 자동 최적화합니다.")
 
@@ -1612,7 +1615,12 @@ class BgComposerApp(QMainWindow):
         if self.chk_use_rag.isChecked():
             api_key = token_key.get_valid_api_key()
             if not api_key:
-                self.txt_trans_result.setPlainText("Error: RAG 기능을 사용하려면 Google API Key가 필요합니다.")
+                self.txt_trans_result.setPlainText("Error: RAG 기능을 사용하려면 Google API Key를 먼저 설정해 주세요.")
+                self.blink_timer.stop()
+                return
+            # RAG 인덱스 준비 여부 사전 확인
+            if not self.rag_prompter.is_ready:
+                self.txt_trans_result.setPlainText("RAG 인덱스 로딩 중... 잠시 후 다시 시도해주세요.")
                 self.blink_timer.stop()
                 return
             self.txt_trans_result.setPlainText("Processing... (RAG 스타일 최적화 중)")
@@ -1638,24 +1646,30 @@ class BgComposerApp(QMainWindow):
         self.preview_worker.start()
 
     def _on_preview_translation_done(self, res):
+        """ Preview (view Result) 처리 콜백 """
         self.blink_timer.stop()
         if not res:
             self.txt_trans_result.setPlainText("Failed.")
             return
             
-        # RAG 결과 (Dict) 처리 - 프롬프트 자동 교체
-        if isinstance(res, dict):
-            p_en = res.get("positive", "")
-            n_en = res.get("negative", "")
+        if self.chk_use_rag.isChecked() and isinstance(res, dict):
+            # RAG 데이터 캐싱 (Generate 시 활용)
+            self._cached_rag_data = res 
             
-            # 사용자가 번거롭지 않게 입력창에 바로 결과를 덮어씌워 줌
-            self.txt_prompt.setPlainText(p_en)
-            if n_en:
-                self.txt_negative.setPlainText(n_en)
-                
-            self.txt_trans_result.setHtml(f"<b style='color:#f39c12'>[🪄 RAG 최적화 적용 완료]</b><br><b>P:</b> {p_en}<br><b>N:</b> {n_en}")
-        # 단순 번역 결과 (Tuple) 처리
+            # 원문 단순 번역본 확보 (UI 표시용)
+            p_en = self.prompt_engine.translate_only(self.txt_prompt.toPlainText())
+            
+            html = f"<b style='color:#f39c12'>[🪄 RAG 템플릿 적용 준비 완료]</b><br>"
+            html += f"<b>원문 번역:</b> {p_en}<br><hr>"
+            html += f"<b>[RAG 분석 결과]</b><br>"
+            html += f"<b>KEEP:</b> {res.get('keep', '')}<br>"
+            html += f"<b>CHANGE:</b> {res.get('change', '')}<br>"
+            html += f"<b>ADD:</b> {res.get('add', '')}<br>"
+            html += f"<b>STYLE:</b> {res.get('style_anchors', '')}<br>"
+            html += f"<b>NEG:</b> {res.get('negative', '')}<br>"
+            self.txt_trans_result.setHtml(html)
         else:
+            self._cached_rag_data = None
             p_en, n_en = res
             self.txt_trans_result.setHtml(f"<b>P:</b> {p_en}<br><b>N:</b> {n_en}")
 
@@ -1825,27 +1839,39 @@ class BgComposerApp(QMainWindow):
         p_raw = self.txt_prompt.toPlainText().strip()
         n_raw = self.txt_negative.toPlainText().strip()
         
-        # --- RAG 사용자 실수 방지 로직 (유지) ---
-        import re
-        if self.chk_use_rag.isChecked() and re.search(r'[가-힣]', p_raw):
-            QMessageBox.information(self, "RAG 최적화 안내", "RAG 최적화가 켜져 있습니다.\n먼저 [view Result] 버튼을 눌러 영문 프롬프트로 변환해주세요.")
-            return
-        # -------------------------------------
-
-        # --- (수정) 프롬프트 엔진을 통한 통합 처리 ---
-        # RAG가 켜져있다면 텍스트 창에 이미 완벽한 영어가 들어있으므로, 
-        # 이중 번역으로 인한 프롬프트 훼손을 막기 위해 번역기를 강제로 끕니다.
-        need_translation = self.chk_translate.isChecked() and not self.chk_use_rag.isChecked()
+        # 메뉴얼 모드 여부
+        is_manual = self.chk_manual_prompt.isChecked()
+        use_rag = self.chk_use_rag.isChecked() and not is_manual
         
+        # RAG 누락 방지: 민화 최적화 체크 후 view Result를 누르지 않은 경우
+        if use_rag and not hasattr(self, '_cached_rag_data'):
+            QMessageBox.information(self, "RAG 최적화 안내", "민화 최적화가 켜져 있습니다.\n먼저 [view Result] 버튼을 눌러 프롬프트를 분석 및 최적화해주세요.")
+            return
+
+        rag_data = getattr(self, '_cached_rag_data', None) if use_rag else None
+        
+        # RAG API 통신 에러 감지 및 차단 로직
+        if rag_data and "RAG Error:" in str(rag_data.get("negative", "")):
+            QMessageBox.critical(
+                self, 
+                "RAG API 통신 오류", 
+                "AI 프롬프트 최적화 중 오류가 발생했습니다.\n서버 트래픽 문제일 수 있으니 [view Result] 버튼을 다시 눌러 RAG 결과를 먼저 확인해 주세요."
+            )
+            return
+            
+        # RAG 사용 여부와 상관없이 번역기 옵션이 켜져있으면 True를 전달.
+        need_translation = self.chk_translate.isChecked()
+
+        # 프롬프트 통합 처리
         p_txt, n_txt = self.prompt_engine.process(
             p_raw=p_raw,
             n_raw=n_raw,
-            manual_mode=self.chk_manual_prompt.isChecked(),
+            manual_mode=is_manual,
             multi_angle=self.chk_multi_angle.isChecked(),
             model_cfg=self._active_model_config,
-            use_translator=need_translation  # <--- 추가됨!
+            use_translator=need_translation,
+            rag_data=rag_data
         )
-        # --------------------------------------------
 
         final_rgb = self.image[:,:,:3] if (self.chk_use_image.isChecked() and self.image is not None) else None
         final_mask = self.generate_mask_from_canvas() if (final_rgb is not None and self.chk_use_mask.isChecked()) else None
@@ -2033,72 +2059,6 @@ class BgComposerApp(QMainWindow):
         super().resizeEvent(e)
         if hasattr(self, 'loading_overlay'): self.loading_overlay.resize(self.centralWidget().size())
 
-    def _parse_camera_tag(self, prompt):
-        match = re.search(r"<camera>(.*?)</camera>", prompt, re.DOTALL)
-        
-        if not match: return None, (0.0, 0.0, 1.0)
-        
-        h_match = re.search(r"horizontal\s*[=:]\s*([-\d\.]+)", match.group(1), re.I)
-        v_match = re.search(r"vertical\s*[=:]\s*([-\d\.]+)", match.group(1), re.I)
-        z_match = re.search(r"zoom\s*[=:]\s*([-\d\.]+)", match.group(1), re.I)
-        h = float(h_match.group(1)) if h_match else 0.0
-        v = float(v_match.group(1)) if v_match else 0.0
-        z = float(z_match.group(1)) if z_match else 1.0
-        
-        return match, (h, v, z)
-
-    def _convert_camera_tag_to_sks(self, prompt):
-        """ h, v, z 파싱 값을 기반으로 Qwen 등 모델용 <sks> 태그와 동적 카메라 앵글 프롬프트 생성.
-            - 기존 하드코딩 제거하고 파라미터에 맞게 매핑 처리.
-        """
-        match, (h, v, z) = self._parse_camera_tag(prompt)
-        if not match: return prompt
-        
-        # 수평(h) 앵글 판단
-        h_desc = "front view"
-        if h <= -30.0: h_desc = "left side view"
-        elif h >= 30.0: h_desc = "right side view"
-        elif abs(h) >= 120.0: h_desc = "back view"
-        
-        # 수직(v) 앵글 판단
-        v_desc = "eye-level shot"
-        if v <= -20.0: v_desc = "low angle shot"
-        elif v >= 20.0: v_desc = "high angle shot"
-        
-        # 줌(z) 거리 판단
-        z_desc = "medium shot"
-        if z >= 1.2: z_desc = "close-up shot"
-        elif z <= 0.8: z_desc = "wide shot"
-        
-        return f"<sks> {h_desc}, {v_desc}, {z_desc}, {prompt.replace(match.group(0), '').strip()}"
-
-    def _convert_camera_tag_for_gemini(self, prompt):
-        """ h, v, z 파싱 값을 기반으로 제미나이(나노 바나나 프로)가 인식하기 좋은 자연어 프롬프트 생성.
-            - 카메라 구도를 문장 맨 앞에 자연스럽게 배치하여 합성에 방해되지 않도록 함.
-        """
-        match, (h, v, z) = self._parse_camera_tag(prompt)
-        if not match: return prompt
-        
-        # 수평(h) 앵글 판단
-        h_desc = "front view"
-        if h <= -30.0: h_desc = "left side view"
-        elif h >= 30.0: h_desc = "right side view"
-        elif abs(h) >= 120.0: h_desc = "back view"
-        
-        # 수직(v) 앵글 판단
-        v_desc = "eye-level"
-        if v <= -20.0: v_desc = "low angle"
-        elif v >= 20.0: v_desc = "high angle"
-        
-        # 줌(z) 거리 판단
-        z_desc = "medium shot"
-        if z >= 1.2: z_desc = "close-up photo"
-        elif z <= 0.8: z_desc = "wide shot photo"
-        
-        # 모델이 혼동하지 않도록 문법적으로 자연스러운 접두어 생성
-        angle_prefix = f"A {z_desc} taken from {h_desc} at {v_desc}, "
-        return f"{angle_prefix}{prompt.replace(match.group(0), '').strip()}"
-
     def get_hf_client(self, space_url, hf_token=None):
         if not space_url: return None
         key = (space_url, bool(hf_token))
@@ -2150,16 +2110,29 @@ class BgComposerApp(QMainWindow):
         # 마스크 사용 시 이질감을 제거하기 위한 동기화 지시어 주입
         final_prompt = prompt
         mask_np = kwargs.get("mask")
+        
+        # 프롬프트에 카메라 앵글 변경 지시가 있는지 확인
+        has_angle_change = "CAMERA DIRECTION" in prompt and "Stable centered frontal view" not in prompt
+        
         if mask_np is not None:
-            # 모델이 마스크 영역을 별개의 개체가 아닌 원본의 일부로 인식하도록 강력히 지시
-            sync_instruction = (
-                "CRITICAL: Match the lighting, shadows, color temperature, and texture of the original image "
-                "perfectly in the masked area. The output must be a single, seamless, and natural composite "
-                "without any visible boundary lines."
-            )
+            if has_angle_change:
+                # 앵글 변경 시: 원본 보존 강박을 줄이고 3D 변형 허용
+                sync_instruction = (
+                    "CRITICAL: Adapt the masked area to match the specified CAMERA DIRECTION. "
+                    "Do NOT strictly preserve the 2D shape of the original if it conflicts with the new perspective."
+                )
+            else:
+                # 앵글 변경 없을 시: 기존처럼 원본 100% 동기화 (조명, 그림자 등)
+                sync_instruction = (
+                    "CRITICAL: Match the lighting, shadows, color temperature, and texture of the original image "
+                    "perfectly in the masked area. The output must be a single, seamless, and natural composite."
+                )
             final_prompt = f"{sync_instruction}\n\nTask: {prompt}"
 
-        gen_temp = kwargs.get("temperature", 0.4) # 조화를 위해 온도를 약간 높여 창의적 합성을 유도
+        # 앵글 변경 시 Temperature를 확 올려서 모델이 창의적으로 형태를 부수도록 허용
+        default_temp = kwargs.get("temperature", 0.4)
+        gen_temp = 0.8 if has_angle_change else default_temp
+        
         res_mode = kwargs.get("resolution_mode", "1:1")
         
         gen_config_params = {

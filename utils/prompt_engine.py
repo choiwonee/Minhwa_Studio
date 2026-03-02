@@ -6,7 +6,7 @@
         2. <camera> 태그 파싱 및 96 가지 앵글 처리
         3. 모델(Provider)별 최적화된 프롬프트 빌드
         - Gemini  : INSTRUCTION 지시문 구조
-        - Qwen    : <sks> 트리거 + 각도 수치 인라인 구조
+        - Qwen : <sks> 트리거 + LoRA vocabulary 공백 구분 캡션 구조
         - 범용     : 단순 묘사형
         4. prompt_mode(mix_way / one_way / two_way) 처리
         5. bg_composer.py 의 기존 메서드 drop-in 교체 지원
@@ -58,8 +58,8 @@ except ImportError:
 @dataclass
 class CameraParams:
     """<camera> 태그에서 파싱된 카메라 파라미터."""
-    horizontal: float = 0.0    # -180 ~ +180  (양수=우, 음수=좌, ±180=정후방)
-    vertical:   float = 0.0    # -90  ~ +90   (양수=상향, 음수=하향)
+    horizontal: float = 0.0    # -180 ~ +180  (양수 = 카메라가 피사체 우측, 음수 = 카메라가 피사체 좌측, ±180 = 정후방)
+    vertical:   float = 0.0    # -90 ~ +90  (양수 = 카메라가 피사체 위에 위치(high-angle), 음수 = 카메라가 피사체 아래에 위치(low-angle))
     zoom:       float = 1.0    # 0.5  ~ 2.0   (1.0=표준)
     roll:       float = 0.0    # Dutch angle (선택)
 
@@ -71,25 +71,28 @@ class CameraParams:
 # 수평(Azimuth) 8분할 ───────────────────────────────────────────────────
 #   기존 코드의 4단계(front/left side/right side/back)에서 대각선 4방향 추가.
 #   ※ abs(h)>=120 이 h>=30 조건에 이미 걸려 back view 가 생성되지 않던 버그 수정.
+# (카메라 위치 기준: 슬라이더 양수(+) = 카메라가 피사체의 우측에 위치, LoRA vocabulary 일치)
 _H_BINS = [
-    (-22.5,   22.5,  "directly in front of the subject",       "front view",            "0°"   ),
-    ( 22.5,   67.5,  "from the front-right of the subject",    "front-right diagonal",  "45°R" ),
-    ( 67.5,  112.5,  "from the right side of the subject",     "right side profile",    "90°R" ),
-    (112.5,  157.5,  "from the rear-right of the subject",     "rear-right diagonal",   "135°R"),
-    (157.5,  180.0,  "from directly behind the subject",       "rear view",             "180°" ),
-    (-180.0, -157.5, "from directly behind the subject",       "rear view",             "180°" ),
-    (-157.5, -112.5, "from the rear-left of the subject",      "rear-left diagonal",    "135°L"),
-    (-112.5,  -67.5, "from the left side of the subject",      "left side profile",     "90°L" ),
-    ( -67.5,  -22.5, "from the front-left of the subject",     "front-left diagonal",   "45°L" ),
+    # 경계값 정책: 각 bin은 (하한 포함, 상한 미포함) 반개방 구간 [lo, hi) 으로 처리한다.
+    # 단, 절댓값 최댓값인 ±180은 예외적으로 back view 에 포함시킨다.
+    # _classify() 의 조건식을 lo <= value < hi 로 변경하여 중복 매칭을 원천 차단한다.
+    (-22.5,   22.5, "directly in front of the subject",    "front view",               "0°"   ),
+    ( 22.5,   67.5, "from the front-right of the subject", "front-right quarter view", "45°R" ), # 양수 = RIGHT
+    ( 67.5,  112.5, "from the right side of the subject",  "right side view",          "90°R" ),  
+    (112.5,  157.5, "from the back-right of the subject",  "back-right quarter view",  "135°R"),  
+    (157.5,  180.0, "from directly behind the subject",    "back view",                "180°" ),  
+    (-180.0,-157.5, "from directly behind the subject",    "back view",                "180°" ),  
+    (-157.5,-112.5, "from the back-left of the subject",   "back-left quarter view",   "135°L"),  
+    (-112.5, -67.5, "from the left side of the subject",   "left side view",           "90°L" ),  
+    ( -67.5, -22.5, "from the front-left of the subject",  "front-left quarter view",  "45°L" ), # 음수 = LEFT
 ]
 
-# 수직(Elevation) 5분할 ────────────────────────────────────────────────
+# 수직(Elevation) 4분할 (LoRA vocabulary: low-angle / eye-level / elevated / high-angle), 음수 구간에 high-angle 배치 (태그가 -v이므로)
 _V_BINS = [
-    (-90.0, -40.0, "extreme low-angle worm's-eye view",      "worm's-eye",   "extreme low" ),
-    (-40.0, -10.0, "low-angle shot looking upward",          "low-angle",    "low"         ),
-    (-10.0,  10.0, "straight eye-level shot",                "eye-level",    "eye-level"   ),
-    ( 10.0,  40.0, "high-angle shot looking downward",       "high-angle",   "high"        ),
-    ( 40.0,  90.0, "extreme high-angle bird's-eye view",     "bird's-eye",   "extreme high"),
+    (-90.0, -45.0, "high-angle shot looking downward",     "high-angle shot", "high"),
+    (-45.0, -15.0, "slightly elevated shot from above",    "elevated shot",   "elevated"),
+    (-15.0,  15.0, "straight eye-level shot",              "eye-level shot",  "eye-level"),
+    ( 15.0,  90.0, "low-angle shot looking upward",        "low-angle shot",  "low"),
 ]
 
 # 줌(Distance) 3분할 ────────────────────────────────────────────────────
@@ -101,11 +104,26 @@ _Z_BINS = [
 
 def _classify(value: float, bins: list) -> dict:
     """ value 가 속하는 bin 을 찾아 dict 로 반환한다.
-        어느 구간에도 해당하지 않으면 가장 가까운 bin 을 반환(폴백).
+
+        [구간 처리 규칙]
+        - 기본: 반개방 구간 [lo, hi) — 하한 포함, 상한 미포함.
+          → 경계값 중복 매칭을 원천 차단한다.
+        - 예외: lo 또는 hi 가 절댓값 최댓값인 경우 닫힌 구간 [lo, hi] 로 처리한다.
+          · 상한 최댓값: hi in (180.0, 90.0, 9.9)  → 상한 포함 (ex. back view 180°, high-angle shot 90°)
+          · 하한 최솟값: lo in (-180.0, -90.0)     → 하한 포함 (ex. back view -180°, low-angle shot -90°)
+
+        [폴백]
+        어느 구간에도 해당하지 않으면 bin 의 하한·상한 경계값까지의 거리가
+        가장 짧은 bin 을 반환한다.
     """
     for lo, hi, verbose, short, tag in bins:
-        if lo <= value <= hi:
-            return {"verbose": verbose, "short": short, "tag": tag}
+        _is_max_boundary = (hi in (180.0, 90.0, 9.9)) or (lo in (-180.0, -90.0))
+        if _is_max_boundary:
+            if lo <= value <= hi:
+                return {"verbose": verbose, "short": short, "tag": tag}
+        else:
+            if lo <= value < hi:
+                return {"verbose": verbose, "short": short, "tag": tag}
     # 폴백: 거리 기준으로 가장 가까운 bin 선택
     best = min(bins, key=lambda b: min(abs(value - b[0]), abs(value - b[1])))
     return {"verbose": best[2], "short": best[3], "tag": best[4]}
@@ -123,6 +141,8 @@ def classify_camera(p: CameraParams) -> dict:
 # 3. <camera> 태그 파싱
 # ---------------------------------------------------------------------------
 _CAM_TAG_RE = re.compile(r"<camera>(.*?)</camera>", re.DOTALL | re.IGNORECASE)
+# 패턴: <sks> 뒤에 최대 3개 공백·쉼표 구분 토큰만 캡처 (탐욕 매칭 방지), LoRA 포맷 예: "<sks> front view eye-level shot medium shot"
+_SKS_ANGLE_RE = re.compile(r'(<sks>\s*[^,\n<]+(?:,\s*[^,\n<]+){0,2})', re.I)
 
 def _extract_camera_block(prompt: str) -> Tuple[str, Optional[str]]:
     """ 프롬프트에서 <camera>...</camera> 블록을 분리한다.
@@ -160,81 +180,153 @@ def _parse_params_from_block(camera_block: str) -> CameraParams:
     return p
 
 # ---------------------------------------------------------------------------
-# 4. 모델별 프롬프트 빌더 (구조화 + 실사화 강력 억제)
+# 4. 모델별 프롬프트 빌더 (모델 특성에 맞는 최적화 프롬프트 생성 + 실사화 강력 억제)
 # ---------------------------------------------------------------------------
-def _parse_structured_prompt(text: str) -> Tuple[str, str]:
-    """ 텍스트에서 [INSTRUCTION]과 [STYLE] 블록을 분리해낸다. """
-    if "[INSTRUCTION]" in text and "[STYLE]" in text:
-        parts = text.split("[STYLE]")
-        inst_part = parts[0].replace("[INSTRUCTION]", "").strip()
-        style_part = parts[1].strip()
-        return inst_part, style_part
-    return text.strip(), "" 
-
-# utils/prompt_engine.py 내 빌더 클래스 수정
-
 class _GeminiBuilder:
-    def build(self, translated_prompt: str, cam: dict) -> str:
+    def build(self, translated_prompt: str, cam: dict, rag_data: dict = None) -> str:
+        """ Gemini 모델용 프롬프트 템플릿 빌드
+            - RAG 미사용 시에도 앵글 조작이 있으면 능동적인 포즈 재계산 지시문을 자동 주입함.
+        """
         h, v, z = cam["h"], cam["v"], cam["z"]
         p: CameraParams = cam["params"]
-        inst, style = _parse_structured_prompt(translated_prompt)
         
-        # 🚨 [조건부 로직] 사용자가 의미 있는 각도 변화를 주었는지 체크 (임계값 5도)
-        has_angle_change = abs(p.horizontal) > 5.0 or abs(p.vertical) > 5.0
-        
-        if has_angle_change:
-            # 각도 변화가 있을 때만 강력한 '카메라 재배치' 명령 하달
-            direction = f"{h['verbose']} and {v['verbose']}"
-            angle_cmd = (
-                f"### PRIMARY TASK: RE-POSITION CAMERA\n"
-                f"Move the viewpoint to a {direction} position. "
-                f"The painting MUST show the subject's {('right' if p.horizontal > 0 else 'left')} side prominently."
-            )
-            meta = f"[angle: {h['tag']}, {v['tag']}, {z['tag']}]"
-            angle_block = f"{angle_cmd}\n{meta}"
-        else:
-            # 변화가 없을 때는 스타일과 내용에 집중하도록 일반적인 구도 묘사만 수행
-            angle_block = f"COMPOSITION: A stable, {z['verbose']} centered frontal view."
+        has_angle = abs(p.horizontal) > 0.1 or abs(p.vertical) > 0.1 or abs(p.zoom - 1.0) > 0.05
+        cam_text = f"Azimuth: {h['short']}, Elevation: {v['short']}, Distance: {z['short']}" if has_angle else "" # Distance(Zoom), 결과 예: "Azimuth: front view, Elevation: eye-level shot, Distance: medium shot"
 
-        style_block = f"\n\n### STYLE & MEDIUM\n{style}" if style else ""
-        return f"{angle_block}\n\n### INSTRUCTION\n{inst}{style_block}"
-    
-    def _get_perspective_desc(self, p: CameraParams) -> str:
-        # 수평 각도에 따른 시각적 변화 서술
-        if abs(p.horizontal) > 20:
-            side = "right" if p.horizontal > 0 else "left"
-            return f"The {side} side of the subject is more visible, creating a 3D volume on the flat paper."
-        return "The subject is centered, emphasizing traditional symmetry."
+        # 💡 보완된 부분: RAG 미사용 시 앵글 단독 지시 처리 강화
+        if not rag_data:
+            if has_angle:
+                # 명확한 카메라 위치 기준 명시과 포즈 재계산 강제 지시문 추가로 앵글 변경 시 실사화 억제 및 자연스러운 포즈 조정 유도
+                action_instruction = (
+                    f"Completely redraw the subject's pose as seen from this camera position: "
+                    f"{cam_text}. "
+                    f"The camera is positioned {h['verbose']} — "
+                    f"redraw the subject's body accordingly so they appear natural from this viewpoint."
+                )
+                if translated_prompt:
+                    return f"{action_instruction} Additional edits: {translated_prompt}".strip()
+                return action_instruction
+            else:
+                return translated_prompt.strip()
+
+        keep = rag_data.get("keep", "Maintain original composition and empty spaces.")
+        change = rag_data.get("change", translated_prompt)
+        add = rag_data.get("add", "none")
+        style = rag_data.get("style_anchors", "traditional Korean minhwa painting style")
+
+        # 앵글 변경 시 구도 보존(compositional weight) 제약을 완전히 삭제하고, 포즈 재계산을 강제함
+        if has_angle:
+            preservation_target = "the brushwork texture, ink wash gradients, silk or hanji paper grain, and mineral pigment palette"
+            l0_rules = "You MUST entirely recalculate the composition and character pose to match the new camera direction. Treat the original image ONLY as a character/style reference, NOT a strict pose guide."
+            l1_header = "[L1] ADAPT THESE ELEMENTS TO THE NEW CAMERA ANGLE (Redraw pose and silhouette naturally):"
+            l5_style = f"{style}, decorative symmetry"
+            change = f"{change}, AND completely redraw the subject's pose to match the {cam_text} perspective."
+        else:
+            preservation_target = "the brushwork texture, ink wash gradients, silk or hanji paper grain, mineral pigment palette, and the overall compositional weight and balance"
+            l0_rules = "Do NOT apply any photorealistic rendering, digital smoothing, or Western perspective correction."
+            l1_header = "[L1] PRESERVE THESE ELEMENTS EXACTLY:"
+            l5_style = f"{style}, flat perspective without vanishing point, decorative symmetry"
+
+        template = f"""[L0] OVERALL STYLE & PRESERVATION:
+                    You are editing a traditional East Asian painting. 
+                    The following baseline elements must remain COMPLETELY UNCHANGED: {preservation_target}. {l0_rules}
+
+                    {l1_header}
+                    {keep}
+
+                    [L2] CAMERA DIRECTION:
+                    {cam_text if cam_text else "Stable centered frontal view"}
+
+                    [L3] MAKE THESE SPECIFIC CHANGES ONLY:
+                    {change}
+
+                    [L4] ADD THE FOLLOWING NEW ELEMENTS:
+                    {add}
+
+                    [L5] APPLY THESE STYLE ANCHORS TO THE FINAL IMAGE:
+                    Synthesize the entire image using these specific domain references: {l5_style}."""
+        return template
 
 class _QwenBuilder:
-    def build(self, translated_prompt: str, cam: dict, use_sks: bool = True) -> str:
+    def build(self, translated_prompt: str, cam: dict, rag_data: dict = None, is_lora: bool = False) -> str:
+        """ Qwen 모델용 프롬프트 템플릿 빌드 (LoRA 여부에 따른 동적 분기)
+            - is_lora == True : <sks> 트리거 + 공백 구분 LoRA vocabulary 포맷 캡션 생성. 결과 예: <sks> front view eye-level shot medium shot
+            - is_lora == False: <sks> 태그 없이 자연어 동사형(Redraw 등) 지시문 생성.
+        """
         h, v, z = cam["h"], cam["v"], cam["z"]
         p: CameraParams = cam["params"]
-        sks = "<sks> " if use_sks else ""
-        inst, style = _parse_structured_prompt(translated_prompt)
         
-        has_angle_change = abs(p.horizontal) > 5.0 or abs(p.vertical) > 5.0
+        has_angle = abs(p.horizontal) > 0.1 or abs(p.vertical) > 0.1 or abs(p.zoom - 1.0) > 0.05
         
-        if has_angle_change:
-            # 각도를 줬을 때: 변화를 강조하는 헤더 사용
-            h_dir = "right" if p.horizontal >= 0 else "left"
-            header = f"{sks}Angle-shifted {h['short']} {v['short']} view, showing the {h_dir} profile, authentic Korean painting."
+        # LoRA 여부에 따른 앵글 문구 및 트리거 태그 분리, (공백 구분, v short tag에 shot 이미 포함), 결과(예): "front view eye-level shot medium shot"
+        angle_phrase = f"{h['short']} {v['short']} {z['short']}" if has_angle else "" 
+        if is_lora:
+            sks = "<sks> "
         else:
-            # 각도를 안 줬을 때: 정면성을 강조하는 안정적인 헤더 사용
-            header = f"{sks}Frontal centered view, authentic traditional Korean painting."
-            
-        return f"{header}\nInstruction: {inst}\nStyle: {style}"
+            sks = ""
 
+        # 1. RAG 미사용 시
+        if not rag_data:
+            if has_angle:
+                if is_lora:
+                    if translated_prompt:
+                        return f"{sks}{angle_phrase} {translated_prompt}".strip()
+                    return f"{sks}{angle_phrase}".strip()
+                else:
+                    action_instruction = f"Redraw the subject completely to a {angle_phrase}."
+                    if translated_prompt:
+                        return f"{action_instruction} Change the image to {translated_prompt}."
+                    return action_instruction
+            else:
+                return f"{sks}{translated_prompt}".strip()
+
+        # 2. RAG 사용 시
+        keep = rag_data.get("keep", "original elements")
+        change = rag_data.get("change", translated_prompt)
+        add = rag_data.get("add", "")
+        style = rag_data.get("style_anchors", "traditional Korean minhwa, joseon genre painting")
+
+        add_str = f" Also add {add}." if add and add.lower() != "none" else ""
+
+        # LoRA 특성 및 일반 Qwen 특성에 맞춘 코어 프롬프트 생성, LoRA 토큰이 앵글을 이미 담당하므로, change에서 각도 재언급 차단
+        if is_lora:
+            if has_angle:
+                # RAG change 필드에서 카메라/앵글 관련 문장 제거
+                change_clean = re.sub(
+                    r'(adjust|change|represent|from above|high-angle|low-angle|vertical|horizontal)[^.]*\.?\s*',
+                    '', change, flags=re.IGNORECASE
+                ).strip().strip(',').strip()
+                prompt_core = f"{angle_phrase} and change the image to {change_clean}, strictly maintaining {keep}.{add_str}"
+            else:
+                prompt_core = f"and change the image to {change}, strictly keeping the 2D shape of {keep} unchanged.{add_str}"
+        else:
+            if has_angle:
+                prompt_core = f"Redraw the subject completely to a {angle_phrase}. Change the image to {change}, while strictly maintaining {keep}.{add_str}"
+            else:
+                prompt_core = f"Change the image to {change}, while strictly keeping the 2D shape of {keep} unchanged.{add_str}"
+
+        # 앵글 모순 필터링용 룰
+        no_rules = "photorealistic shading, depth of field blur, digital smoothing, anachronistic elements" if has_angle else "photorealistic shading, depth of field blur, Western linear perspective, digital smoothing, anachronistic elements"
+
+        template = f"""{sks}{prompt_core} Render in {style}, decorative symmetry. 
+                    NO: {no_rules}"""
+        return template.strip()
+    
 class _GenericBuilder:
-    def build(self, translated_prompt: str, cam: dict) -> str:
+    def build(self, translated_prompt: str, cam: dict, rag_data: dict = None) -> str:
+        """ 범용 모델 프롬프트 템플릿 빌드 """
         h, v, z = cam["h"], cam["v"], cam["z"]
-        inst, style = _parse_structured_prompt(translated_prompt)
+        p: CameraParams = cam["params"]
         
-        # SD 계열
-        if style:
-            return f"(traditional Korean painting:1.3), ({inst}:1.2), ({style}:1.1), {z['short']} {h['short']} {v['short']}"
-        return f"(traditional Korean painting:1.3), {inst}, {z['short']} {h['short']} {v['short']}"
+        has_angle = abs(p.horizontal) > 0.1 or abs(p.vertical) > 0.1 or abs(p.zoom - 1.0) > 0.05
+        angle_str = f"{h['short']} {v['short']} {z['short']}" if has_angle else "" # 결과 예: "front view eye-level shot medium shot"
+        if rag_data:
+            parts = [rag_data.get('change', translated_prompt), rag_data.get('style_anchors', ''), angle_str]
+        else:
+            parts = [translated_prompt, angle_str]
 
+        return ", ".join(p for p in parts if p).strip(", ")
+    
 # ---------------------------------------------------------------------------
 # 5. 프롬프트 모드 처리
 # ---------------------------------------------------------------------------
@@ -288,33 +380,97 @@ class PromptEngine:
         self._generic = _GenericBuilder()
 
     # 메인 진입점 ──────────────────────────────────────────────────────
-    def process(self, p_raw: str, n_raw: str = "", manual_mode: bool = False, multi_angle: bool = False, model_cfg: dict = None, use_translator: bool = True) -> Tuple[str, str]:
-        """ 사용자 입력 프롬프트를 최종 추론용 텍스트로 변환한다. """
+    def process(
+        self,
+        p_raw:          str,
+        n_raw:          str  = "",
+        manual_mode:    bool = False,
+        multi_angle:    bool = False,
+        model_cfg:      dict = None,
+        use_translator: bool = True,
+        rag_data:       dict = None,
+    ) -> Tuple[str, str]:
+        """ 프롬프트 통합 처리 메인 진입점
+            Args:
+                p_raw          : 원시 긍정 프롬프트 (한국어 가능, <camera>/<sks> 포함 가능)
+                n_raw          : 원시 부정 프롬프트
+                manual_mode    : True 이면 use_translator 와 무관하게 번역·앵글 변환을 모두 건너뛴다
+                multi_angle    : True 일 때만 <camera> 태그를 앵글 지시문으로 변환한다
+                model_cfg      : config.ini 에서 로드된 모델 설정 dict
+                use_translator : False 이면 번역을 건너뛴다. manual_mode=True 이면 이 값은 무시된다.
+                rag_data       : RAGPrompter 가 반환한 분석 결과 dict (없으면 None)
+        """
         model_cfg = model_cfg or {}
-
-        # 수동 모드: 원본 그대로 반환 ──────────────────────────────────
-        if manual_mode:
-            return p_raw, n_raw
-
-        # Step 1: <camera> 태그 분리 보존 (번역기 손상 방지) ────────────
-        p_no_tag, cam_block = _extract_camera_block(p_raw)
-
-        # Step 2: 번역 여부에 따라 텍스트 처리 (수정된 부분: 이중 번역 방지)
-        if use_translator:
-            p_txt = _translate(p_no_tag)
-            n_txt = _translate(n_raw)
+        sks_match  = _SKS_ANGLE_RE.search(p_raw)
+        sks_prefix = sks_match.group(1).strip() if sks_match else ""
+        
+        if sks_prefix:
+            p_raw_clean = _SKS_ANGLE_RE.sub("", p_raw).strip().lstrip(", \t")
         else:
-            p_txt = p_no_tag
-            n_txt = n_raw
+            p_raw_clean = p_raw
+        
+        # 1. <camera> 태그 분리 (어떤 모드에서든 앵글 처리를 위해 선행)
+        p_no_tag, cam_block = _extract_camera_block(p_raw_clean)
 
-        # Step 3: 멀티 앵글 변환 및 유실 방지 처리 ───────────────────────
-        if cam_block:
-            if multi_angle:
-                p_txt = self._apply_angle(p_txt, cam_block, model_cfg)
+        # 2. 번역 및 수동 모드 처리
+        if manual_mode: # manual_mode=True 이면 use_translator 설정과 무관하게 번역·변환을 모두 건너뛴다.
+            p_txt = p_no_tag # ← use_translator 무시
+            n_txt = n_raw    # ← n_raw도 번역 안 함
+        else:
+            # rag_data 가 있을 때는 RAGPrompter 가 이미 영어로 분석을 완료했으므로 번역을 건너뛴다.
+            p_txt = p_no_tag if rag_data else (_translate(p_no_tag) if use_translator else p_no_tag)
+            n_txt = _translate(n_raw) if use_translator else n_raw
+
+        # 3. 템플릿 및 앵글 적용
+        # multi_angle=False 이면 cam_block 을 무시하여 앵글 지시문을 생성하지 않는다.
+        effective_cam_block = cam_block if multi_angle else None
+        params = _parse_params_from_block(effective_cam_block) if effective_cam_block else CameraParams()
+        cam = classify_camera(params)
+        
+        provider = model_cfg.get("provider", "").lower()
+        pipe_type = model_cfg.get("pipeline_type", "").lower()
+        
+        # config.ini에 정의된 모델 URI나 Repo ID에 'lora' 키워드가 있는지 동적 확인
+        repo_id = model_cfg.get("repo_id", "").lower()
+        api_uri = model_cfg.get("api_model_uri", "").lower()
+        is_lora = "lora" in repo_id or "lora" in api_uri
+
+        if "google_genai" in provider:
+            p_txt = self._gemini.build(p_txt, cam, rag_data)
+        elif "fal_ai" in provider or "qwen" in pipe_type:
+            # 빌더에 is_lora 플래그를 넘겨 동적 분기 처리
+            p_txt = self._qwen.build(p_txt, cam, rag_data, is_lora=is_lora)
+        else:
+            p_txt = self._generic.build(p_txt, cam, rag_data)
+
+        # Negative 병합 (RAG에서 분석된 negative 요소 추가)
+        if rag_data and rag_data.get("negative"):
+            n_txt = f"{n_txt}, {rag_data['negative']}".strip(", ")
+
+        # 4. 앵글 모순 필터링 (입체 앵글 적용 시 평면성 강제 키워드 삭제)
+        has_angle = abs(params.horizontal) > 0.1 or abs(params.vertical) > 0.1 or abs(params.zoom - 1.0) > 0.05
+        if has_angle and n_txt:
+            n_txt = re.sub(r"(?i)\bWestern perspective\b", "", n_txt) 
+            n_txt = re.sub(r",\s*,", ",", n_txt).strip(" ,") 
+
+        # 5. sks_prefix 복원 (직접 입력된 <sks> 앵글 명령 보존)
+        # cam_block이 없을 때만 복원한다 (cam_block이 있으면 QwenBuilder가 이미 <sks>를 생성함)
+        # 이중 <sks> 방지: p_txt에 이미 <sks>가 있으면 sks_prefix의 <sks>를 제거하고 앵글 부분만 앞에 붙인다
+        if sks_prefix and not effective_cam_block:
+            if re.match(r'<sks>', p_txt.lstrip(), re.I): # p_txt에 이미 <sks>가 있는지 대소문자 무관하게 확인
+                # QwenBuilder가 이미 <sks>를 추가한 경우: sks_prefix에서 앵글 텍스트만 추출하여 교체
+                angle_only = re.sub(r'^<sks>\s*', '', sks_prefix, flags=re.I).strip()
+                # 기존 <sks> 뒤에 앵글 텍스트를 삽입
+                p_txt = re.sub(r'^(<sks>\s*)', rf'\1{angle_only} ', p_txt.lstrip(), flags=re.I)
             else:
-                p_txt = f"{p_txt} {cam_block}"
-
+                p_txt = f"{sks_prefix} {p_txt}".strip()
+        
         return p_txt, n_txt
+    
+    def translate_only(self, text: str) -> str:
+        """ Preview UI 출력을 위한 단순 번역 헬퍼 """
+        p_no_tag, _ = _extract_camera_block(text)
+        return _translate(p_no_tag)
 
     def build_payload(
         self,
@@ -342,13 +498,17 @@ class PromptEngine:
         params = _parse_params_from_block(cam_block)
         cam    = classify_camera(params)
 
-        provider = model_cfg.get("provider", "").lower()
+        provider  = model_cfg.get("provider", "").lower()
+        pipe_type = model_cfg.get("pipeline_type", "").lower()
+        repo_id   = model_cfg.get("repo_id", "").lower()
+        api_uri   = model_cfg.get("api_model_uri", "").lower()
+        is_lora   = "lora" in repo_id or "lora" in api_uri
 
         if "google_genai" in provider:
             return self._gemini.build(translated_prompt, cam)
 
-        elif "fal_ai" in provider or "qwen" in model_cfg.get("pipeline_type", "").lower():
-            return self._qwen.build(translated_prompt, cam)
+        elif "fal_ai" in provider or "qwen" in pipe_type:
+            return self._qwen.build(translated_prompt, cam, is_lora=is_lora)
 
         else:
             return self._generic.build(translated_prompt, cam)
@@ -366,9 +526,10 @@ class PromptEngine:
         clean  = _CAM_TAG_RE.sub("", prompt).strip()
         return self._gemini.build(clean, cam)
 
-    def convert_for_qwen(self, prompt: str, use_sks: bool = True) -> str:
+    def convert_for_qwen(self, prompt: str, is_lora: bool = True) -> str:
         """ 기존 _convert_camera_tag_to_sks() 의 drop-in 대체 메서드.
             prompt 안에 <camera> 태그가 포함되어 있어야 한다.
+            is_lora: True 이면 <sks> 트리거 포함, False 이면 자연어 지시문 생성.
         """
         _, cam_block = _extract_camera_block(prompt)
         if not cam_block:
@@ -376,7 +537,7 @@ class PromptEngine:
         params = _parse_params_from_block(cam_block)
         cam    = classify_camera(params)
         clean  = _CAM_TAG_RE.sub("", prompt).strip()
-        return self._qwen.build(clean, cam, use_sks=use_sks)
+        return self._qwen.build(clean, cam, is_lora=is_lora)
 
     # 디버그 헬퍼 ──────────────────────────────────────────────────────
     def explain(self, prompt: str) -> str:
@@ -392,8 +553,7 @@ class PromptEngine:
         )
 
 # ---------------------------------------------------------------------------
-# 7. bg_composer.py 메서드 2개를 PromptEngine 으로 교체하는 패치 함수
-#    (기존 클래스 내부를 수정하기 어려울 때 __init__() 끝에서 호출)
+# 7. bg_composer.py 메서드 교체 패치 함수
 # ---------------------------------------------------------------------------
 def patch_bg_composer(app_instance, engine: PromptEngine = None):
     """ BgComposerApp 인스턴스에 PromptEngine 을 주입하고
@@ -453,9 +613,9 @@ if __name__ == "__main__":
         ("정면 아이레벨 미디엄",     0.0,   0.0,  1.0),
         ("우측 45° 하이앵글 와이드", 45.0,  25.0, 0.7),
         ("좌측 90° 로우앵글 클로즈", -90.0,-30.0, 1.6),
-        ("정후방 버즈아이 와이드",  170.0,  55.0, 0.5),
+        ("정후방 하이앵글 와이드",  170.0,  55.0, 0.5),
         ("후좌 135° 아이레벨",     -135.0,  5.0,  1.0),
-        ("정면 극저각 워름즈아이",    0.0, -80.0, 1.2),
+        ("정면 극저각 로우앵글",      0.0, -80.0, 1.2),
         ("전방우 더치앵글",          30.0,   0.0,  1.0),
     ]
 

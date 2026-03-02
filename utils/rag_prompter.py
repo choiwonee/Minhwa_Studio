@@ -3,6 +3,8 @@ import json
 import re
 import numpy as np
 import faiss
+
+from utils.config_loader import config
 from sentence_transformers import SentenceTransformer
 from google import genai
 
@@ -71,9 +73,10 @@ class RAGPrompter:
         return sorted(tags)
 
     def generate_enhanced_prompt(self, user_input: str, api_key: str, **kwargs):
-        # [안전장치] **kwargs 추가 완료
-        if not self.is_ready or not api_key:
-            return {"positive": user_input, "negative": "Error: RAG not ready or API key missing."}
+        if not self.is_ready:
+            return {"positive": user_input, "negative": "Error: RAG index not ready yet. Please wait a moment and try again."}
+        if not api_key:
+            return {"positive": user_input, "negative": "Error: API key missing. Please set your Google API key."}
 
         try:
             qtags = self._infer_query_tags(user_input)
@@ -90,7 +93,7 @@ class RAGPrompter:
             reranked.sort(key=lambda x: x[0], reverse=True)
             top_docs = reranked[:4] 
 
-            # 2. 필수 가드레일 추출 [복원 완료: 매칭 태그가 많은 순서대로 정렬]
+            # 2. 필수 가드레일 추출
             must = []
             must_tag_set = set(self.must_have_any_tags)
             for d in self.docs:
@@ -118,43 +121,24 @@ class RAGPrompter:
                     
             evidence = "\n\n".join(chunks).strip()[:5200]
 
-            # 4. Gemini 호출 지시문 (구조화된 프롬프트 적용)
+            # 4. config.ini 에서 지시문 및 템플릿 동적 로드
             client = genai.Client(api_key=api_key)
-            instructions = (
-                "너는 '한국 전통 회화(조선 민화 포함)' 전용 프롬프트 엔지니어다.\n"
-                "너의 최우선 목표는 사용자의 지시를 명확한 '행동(Instruction)'과 '화풍(Style)'으로 분리하여 구조화하는 것이다.\n"
-                "아래 '레시피(근거)'는 규칙이다. 근거에 없는 스타일을 추정해서 추가하지 마라.\n"
-                "다음을 절대 금지한다: 동화책/아동 일러스트, 실사/시네마틱, 텍스트/워터마크, 현대 오브젝트.\n"
-                "출력은 오직 JSON 1개만 반환해라.\n"
-                "JSON 스키마: {\"positive\": \"...\", \"negative\": \"...\"}\n"
-                "- positive: 반드시 [INSTRUCTION]과 [STYLE] 두 구역으로 나누어 작성해라.\n"
-                "  * [INSTRUCTION] 에는 사용자의 원래 요청을 자연스러운 영어 지시문으로 번역.\n"
-                "  * [STYLE] 에는 근거를 바탕으로 한 전통 회화 스타일 키워드들을 쉼표로 나열.\n"
-                "- negative: 금지 요소를 쉼표로 나열.\n"
-                "추가 설명이나 마크다운 코드블록을 절대 붙이지 마라.\n"
-                "중요: 사용자가 카메라 각도를 지정하면, 평면적인 민화 기법을 유지하되\n"
-                "오브젝트의 배치와 원근감을 조절하여 해당 각도를 시각적으로 명확히 표현해라.\n"
-                "특히 다음을 절대 금지한다: 특정 유명 화가나 현대 작가의 이름을 언급하거나 그들의 개별 작품을 복제하는 행위.\n"
-                "결과는 반드시 보편적이고 전형적인 조선 민화의 양식을 따르도록 구성해라.\n"
-            )
-
-            prompt = (
-                f"[사용자 입력]\n{user_input.strip()}\n\n"
-                f"[레시피(근거) - 반드시 준수]\n{evidence}\n\n"
-                "작업 지시:\n"
-                "1) 사용자 입력의 핵심 행동을 영어로 번역하여 [INSTRUCTION] 아래에 적어라.\n"
-                "2) [STYLE] 아래에는 반드시 다음 매체/기법 앵커를 포함해라:\n"
-                "   - hanji paper OR aged plaster mural OR silk scroll 중 1개\n"
-                "   - ink brush outlines, mineral pigments, flat color fills, minimal shading\n"
-                "3) negative에는 반드시 아래를 포함해라:\n"
-                "   - children’s book, storybook, kawaii, chibi, cartoon, anime, patchwork\n"
-                "   - photorealistic, DSLR, cinematic lighting, HDR, 3D render\n"
-                "   - text, logo, watermark, signature, modern objects\n"
-                "4) 결과는 JSON만 출력.\n"
-                "\n출력 예시(JSON 형식 그대로):\n"
-                "{\"positive\":\"[INSTRUCTION]\\nChange the background to a spring forest and draw a tiger.\\n[STYLE]\\nTraditional Korean Minhwa, hanji paper, ink brush outlines, flat color fills...\",\"negative\":\"photorealistic, 3D render, text...\"}\n"
-            )
             
+            # config.ini에 누락되었을 경우를 대비한 최소한의 fallback 문자열 제공
+            fallback_instructions = "너는 한국 전통 회화 프롬프트 엔지니어다. 결과를 JSON으로 출력해라."
+            fallback_template = "[사용자 입력]\n{user_input}\n\n[레시피]\n{evidence}\n위 내용을 바탕으로 JSON을 만들어라."
+            
+            instructions_raw = config.get_config_value("RAG_Templates", "instructions", fallback_instructions)
+            prompt_template_raw = config.get_config_value("RAG_Templates", "prompt_template", fallback_template)
+
+            # 파이썬 동적 변수 주입 (.format 사용)
+            instructions = instructions_raw.strip()
+            prompt = prompt_template_raw.format(
+                user_input=user_input.strip(), 
+                evidence=evidence
+            ).strip()
+            
+            # Gemini API 호출
             response = client.models.generate_content(
                 model=self.gemini_model, 
                 contents=f"{instructions}\n\n{prompt}"
@@ -166,13 +150,9 @@ class RAGPrompter:
             
             try:
                 data = json.loads(raw_json)
-                positive = str(data.get("positive", "")).strip()
-                negative = str(data.get("negative", "")).strip()
-                if not positive:
-                    raise ValueError("positive가 비어 있습니다.")
-                return {"positive": positive, "negative": negative}
+                return data 
             except Exception:
-                return {"positive": raw, "negative": ""}
+                return {"change": raw, "negative": ""}
 
         except Exception as e:
-            return {"positive": user_input, "negative": f"RAG Error: {e}"}
+            return {"change": user_input, "negative": f"RAG Error: {e}"}

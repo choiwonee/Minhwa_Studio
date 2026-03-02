@@ -320,9 +320,9 @@ class Effect25DApp(QMainWindow):
             canvas.set_mode("view")
             canvas.set_show_crosshair(False)
         
-        self.tabs.addTab(self.canvas_result, "Result (2.5D)")
         self.tabs.addTab(self.canvas_depth, "Depth Map")
         self.tabs.addTab(self.canvas_original, "Original")
+        self.tabs.addTab(self.canvas_result, "Result (2.5D)")
         
         main_layout.addWidget(self.tabs, 1)
 
@@ -483,7 +483,7 @@ class Effect25DApp(QMainWindow):
             if img is None:
                 QMessageBox.warning(self, "Error", "이미지를 불러올 수 없습니다.")
                 return
-            self.tabs.setCurrentIndex(2)
+            self.tabs.setCurrentIndex(1)
             self.toggle_param_controls(False)
             self.processor.depth_map = None
             self.canvas_depth.set_image(None)
@@ -527,7 +527,7 @@ class Effect25DApp(QMainWindow):
         depth_vis = (depth_map * 255).astype(np.uint8)
         depth_vis = cv2.cvtColor(depth_vis, cv2.COLOR_GRAY2RGB)
         self.canvas_depth.set_image(depth_vis)
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(0)
         QTimer.singleShot(50, self.canvas_depth.fit_to_window) 
         self.toggle_param_controls(True)
         self.trigger_pipeline()
@@ -575,7 +575,7 @@ class Effect25DApp(QMainWindow):
                 self.force_fit_result = False
             else:
                 self.canvas_result.set_image_keep_view(result_img)
-            if self.tabs.currentIndex() != 0: self.tabs.setCurrentIndex(0)
+            if self.tabs.currentIndex() != 2: self.tabs.setCurrentIndex(2)
 
     def on_pipeline_error(self, e):
         self.is_pipeline_running = False

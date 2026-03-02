@@ -50,8 +50,19 @@ class ConfigLoader:
         # 자주 사용하는 설정을 속성으로 노출
         self.weights_dir  = self._resolve_weights_dir()
         self.weights_path = str(self.weights_dir)   # 레거시 str 호환 (realesrgan 등)
-        self.hf_token     = self.get_config_value("Settings", "hf_token", "")
-        self.api_key      = self.get_config_value("Settings", "api_key",  "")
+        
+        # token_key를 통해 복호화된 값 사용
+        try:
+            from utils.token_key import get_valid_hf_token
+            self.hf_token = get_valid_hf_token() or ""
+        except Exception:
+            self.hf_token = self.get_config_value("Settings", "hf_token", "")
+            
+        try:
+            from utils.token_key import get_valid_api_key
+            self.api_key = get_valid_api_key() or ""
+        except Exception:
+            self.api_key = self.get_config_value("Settings", "api_key", "")
 
     # 로딩 ───────────────────────────────────────────────────────────
     def _load(self):

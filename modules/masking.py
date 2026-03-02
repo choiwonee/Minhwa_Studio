@@ -54,6 +54,7 @@ def sample_points_in_mask(mask, npoints=30):
 class SAMGuiApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.preview_canvas = None
         # 1. 윈도우 설정
         self.setWindowTitle("SAM2 - Qt Mask Extractor (Tabbed UI)")
         

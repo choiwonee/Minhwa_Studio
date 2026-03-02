@@ -1112,7 +1112,12 @@ class VisualCameraWidget(QWidget):
         v = self.slider_v.value()
         z = self.slider_z.value() / 100.0
         self.lbl_h.setText(f"{h}°"); self.lbl_v.setText(f"{v}°"); self.lbl_z.setText(f"{z:.1f}")
-        tag = f"<camera>horizontal={h} vertical={v} zoom={z:.2f}</camera>"
+        # UI 슬라이더 v값을 반전해서 태그 생성
+        #   UI: +위쪽 = 사용자 직관상 "위에서 내려다봄(high-angle)"
+        #   LoRA: vertical 양수 = high-angle  →  부호 반전 불필요하게 됨
+        #   현재 _V_BINS: 양수 = high-angle (이미 올바름)
+        #   문제는 슬라이더 +값이 태그에 그대로 넘어가는 것이므로, 여기서 반전
+        tag = f"<camera>horizontal={h} vertical={-v} zoom={z:.2f}</camera>" # -v 로 변경
         self.sig_prompt_changed.emit(tag)
 
     def reset_all_values(self):
@@ -1131,7 +1136,7 @@ class VisualCameraWidget(QWidget):
         z = self.slider_z.value() / 100.0
         trigger = self.txt_trigger.text().strip()
         
-        part = f"horizontal={h} vertical={v} zoom={z:.2f}"
+        part = f"horizontal={h} vertical={-v} zoom={z:.2f}" # -v로 변경
         return f"{trigger} {part}" if trigger else part
 
     # bg_composer.py의 run_generation (Safety Net)에서 호출됨
@@ -1142,7 +1147,7 @@ class VisualCameraWidget(QWidget):
         h = self.slider_h.value()
         v = self.slider_v.value()
         z = self.slider_z.value() / 100.0
-        return f"<camera>horizontal={h} vertical={v} zoom={z:.2f}</camera>"
+        return f"<camera>horizontal={h} vertical={-v} zoom={z:.2f}</camera>" # -v로 변경
 
     def _step_val(self, widget, step, wrap):
         """ 슬라이더 값 증감 처리 (버튼 연동)
