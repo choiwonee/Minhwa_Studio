@@ -197,12 +197,13 @@ class _GeminiBuilder:
         # style_anchors/negative 를 주입하지 않고 change + keep 만 사용.
         # 모델이 입력 이미지를 직접 보고 있으므로 스타일 재지정은 오히려 충돌을 유발함.
         if rag_data and rag_data.get("mode") == "i2i":
-            change = rag_data.get("change", translated_prompt).strip()
-            keep   = rag_data.get("keep", "").strip()
+            # [수정] LLM 응답 텍스트 끝에 포함된 마침표(.) 제거하여 중복 마침표(..) 방지
+            change = rag_data.get("change", translated_prompt).strip().rstrip('.')
+            keep   = rag_data.get("keep", "").strip().rstrip('.')
             keep_clause = f" Preserve {keep}." if keep else ""
             if has_angle:
                 return (
-                    f"Redraw from this camera position: {cam_text}. "
+                    f"Redraw from this camera position to {cam_text}. "
                     f"{change}.{keep_clause}"
                 ).strip()
             return f"{change}.{keep_clause}".strip()
@@ -213,7 +214,7 @@ class _GeminiBuilder:
             if has_angle:
                 # 명확한 카메라 위치 기준 명시과 포즈 재계산 강제 지시문 추가로 앵글 변경 시 실사화 억제 및 자연스러운 포즈 조정 유도
                 action_instruction = (
-                    f"Completely redraw the subject's pose as seen from this camera position: "
+                    f"Completely redraw the subject's pose as seen from this camera position to "
                     f"{cam_text}. "
                     f"The camera is positioned {h['verbose']} — "
                     f"redraw the subject's body accordingly so they appear natural from this viewpoint."
@@ -224,10 +225,11 @@ class _GeminiBuilder:
             else:
                 return translated_prompt.strip()
 
-        keep = rag_data.get("keep", "Maintain original composition and empty spaces.")
-        change = rag_data.get("change", translated_prompt)
-        add = rag_data.get("add", "none")
-        style = rag_data.get("style_anchors", "traditional Korean minhwa painting style")
+        # 일반 RAG 모드에서도 중복 마침표 방지를 위해 rstrip('.') 적용
+        keep = rag_data.get("keep", "Maintain original composition and empty spaces.").strip().rstrip('.')
+        change = rag_data.get("change", translated_prompt).strip().rstrip('.')
+        add = rag_data.get("add", "none").strip().rstrip('.')
+        style = rag_data.get("style_anchors", "traditional Korean minhwa painting style").strip().rstrip('.')
 
         # 앵글 변경 시 구도 보존(compositional weight) 제약을 완전히 삭제하고, 포즈 재계산을 강제함
         if has_angle:
@@ -265,7 +267,7 @@ class _GeminiBuilder:
 class _QwenBuilder:
     def build(self, translated_prompt: str, cam: dict, rag_data: dict = None, is_lora: bool = False) -> str:
         """ Qwen 모델용 프롬프트 템플릿 빌드 (LoRA 여부에 따른 동적 분기)
-            - is_lora == True : <sks> 트리거 + 공백 구분 LoRA vocabulary 포맷 캡션 생성. 결과 예: <sks> front view eye-level shot medium shot
+            - is_lora == True : <sks> 트리거 + 공백 구분 LoRA vocabulary 포맷 캡션 생성. 결과 예: <sks> front view eye-level shot medium shot.
             - is_lora == False: <sks> 태그 없이 자연어 동사형(Redraw 등) 지시문 생성.
         """
         h, v, z = cam["h"], cam["v"], cam["z"]
@@ -275,56 +277,78 @@ class _QwenBuilder:
         
         # LoRA 여부에 따른 앵글 문구 및 트리거 태그 분리, (공백 구분, v short tag에 shot 이미 포함), 결과(예): "front view eye-level shot medium shot"
         angle_phrase = f"{h['short']} {v['short']} {z['short']}" if has_angle else "" 
-        if is_lora:
-            sks = "<sks> "
-        else:
-            sks = ""
+        sks = "<sks> " if is_lora else ""
 
         # ── I2I RAG 모드 ───────────────────────────────────────────────────
         if rag_data and rag_data.get("mode") == "i2i":
-            change = rag_data.get("change", translated_prompt).strip()
-            keep   = rag_data.get("keep", "").strip()
-            keep_clause = f" strictly keeping {keep} unchanged." if keep else "."
+            # 마침표 제거 및 첫 글자 대문자화로 자연스러운 문장 구조 형성
+            change = rag_data.get("change", translated_prompt).strip().rstrip('.')
+            keep   = rag_data.get("keep", "").strip().rstrip('.')
+            keep_clause = f", strictly keeping {keep} unchanged" if keep else ""
+            
+            if change:
+                change = change[0].upper() + change[1:]
+            
             if has_angle:
-                angle_phrase = f"{h['short']} {v['short']}" if has_angle else ""
-                return f"{sks}Redraw to {angle_phrase}. {change}{keep_clause}".strip()
-            return f"{sks}{change}{keep_clause}".strip()
+                if is_lora:
+                    # LoRA 규격 강제 적용: 앵글태그 나열 후 마침표(.) 추가, 그 뒤 지시문 연결
+                    return f"{sks}{angle_phrase}. {change}{keep_clause}."
+                else:
+                    return f"Redraw to {angle_phrase}. {change}{keep_clause}."
+            return f"{sks}{change}{keep_clause}."
         # ── I2I RAG 모드 끝 ───────────────────────────────────────────────        
 
         # 1. RAG 미사용 시
         if not rag_data:
+            # [수정] 번역된 프롬프트의 기존 마침표를 미리 제거하여 중복(..) 방지
+            translated_prompt = translated_prompt.strip().rstrip('.') if translated_prompt else ""
+            
             if has_angle:
                 if is_lora:
                     if translated_prompt:
-                        return f"{sks}{angle_phrase} {translated_prompt}".strip()
-                    return f"{sks}{angle_phrase}".strip()
+                        translated_prompt = translated_prompt[0].upper() + translated_prompt[1:]
+                        # angle_phrase 뒤에 마침표(.)를 명시적으로 추가하여 분리
+                        return f"{sks}{angle_phrase}. {translated_prompt}."
+                    return f"{sks}{angle_phrase}.".strip()
                 else:
                     action_instruction = f"Redraw the subject completely to a {angle_phrase}."
                     if translated_prompt:
+                        translated_prompt = translated_prompt[0].upper() + translated_prompt[1:]
                         return f"{action_instruction} Change the image to {translated_prompt}."
                     return action_instruction
             else:
-                return f"{sks}{translated_prompt}".strip()
+                if translated_prompt:
+                    translated_prompt = translated_prompt[0].upper() + translated_prompt[1:]
+                    return f"{sks}{translated_prompt}."
+                return sks.strip()
 
-        # 2. RAG 사용 시
-        keep = rag_data.get("keep", "original elements")
-        change = rag_data.get("change", translated_prompt)
-        add = rag_data.get("add", "")
-        style = rag_data.get("style_anchors", "traditional Korean minhwa, joseon genre painting")
+        # 2. RAG 사용 시 (T2I)
+        keep = rag_data.get("keep", "original elements").strip().rstrip('.')
+        change = rag_data.get("change", translated_prompt).strip().rstrip('.')
+        add = rag_data.get("add", "").strip().rstrip('.')
+        style = rag_data.get("style_anchors", "traditional Korean minhwa, joseon genre painting").strip().rstrip('.')
 
         add_str = f" Also add {add}." if add and add.lower() != "none" else ""
+        
+        if change:
+            change = change[0].upper() + change[1:]
 
-        # LoRA 특성 및 일반 Qwen 특성에 맞춘 코어 프롬프트 생성, LoRA 토큰이 앵글을 이미 담당하므로, change에서 각도 재언급 차단
+        # LoRA 특성 및 일반 Qwen 특성에 맞춘 코어 프롬프트 생성
         if is_lora:
             if has_angle:
-                # RAG change 필드에서 카메라/앵글 관련 문장 제거
+                # RAG change 필드에서 불필요한 카메라/앵글 관련 문장 제거 후 앵글 태그를 최전방 배치
                 change_clean = re.sub(
                     r'(adjust|change|represent|from above|high-angle|low-angle|vertical|horizontal)[^.]*\.?\s*',
                     '', change, flags=re.IGNORECASE
                 ).strip().strip(',').strip()
-                prompt_core = f"{angle_phrase} and change the image to {change_clean}, strictly maintaining {keep}.{add_str}"
+                
+                if change_clean:
+                    change_clean = change_clean[0].upper() + change_clean[1:]
+                    
+                # angle_phrase 뒤에 마침표(.) 추가하여 모든 모드에서 통일성 유지
+                prompt_core = f"{angle_phrase}. Change the image to {change_clean}, strictly maintaining {keep}.{add_str}"
             else:
-                prompt_core = f"and change the image to {change}, strictly keeping the 2D shape of {keep} unchanged.{add_str}"
+                prompt_core = f"Change the image to {change}, strictly keeping the 2D shape of {keep} unchanged.{add_str}"
         else:
             if has_angle:
                 prompt_core = f"Redraw the subject completely to a {angle_phrase}. Change the image to {change}, while strictly maintaining {keep}.{add_str}"

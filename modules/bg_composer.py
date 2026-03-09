@@ -1768,7 +1768,30 @@ class BgComposerApp(QMainWindow):
     def _should_cancel(self):
         return self._cancel_event.is_set()
 
+    def _parse_options(self, model_config: dict):
+        """ 모델별 options 필드 파싱
+            - options 문자열에서 단일 플래그(set)와 key=value(dict) 형태를 동시에 파싱하여 분리 반환합니다.
+        """
+        raw = model_config.get("options", [])
+        items = raw if isinstance(raw, list) else [x.strip() for x in raw.split(",")]
+        flags, kv = set(), {}
+        
+        for item in items:
+            item = item.strip()
+            if not item: continue
+            
+            if "=" in item:
+                k, _, v = item.partition("=")
+                kv[k.strip().lower()] = v.strip()
+            else:
+                flags.add(item.lower())
+                
+        return flags, kv
+
     def _task_smart_generation(self, model_cfg, mode_ui, is_remote_forced, **kwargs):
+        """ 스마트 백그라운드 워커 추론 작업 수행 
+            - 마스크 체크 해제 혹은 빈 마스크일 경우 명시적으로 None 처리하여 API 및 후처리로 넘김
+        """
         execution_mode = "remote" if is_remote_forced or model_cfg.get("mode") == "remote" else "local"
         
         if execution_mode == "local":
@@ -1785,28 +1808,38 @@ class BgComposerApp(QMainWindow):
         
         if execution_mode == "remote":
             gen_pil = self.call_remote_api(model_cfg=model_cfg, **kwargs)
-            post_mask = kwargs.get("mask") if kwargs.get("use_mask") else None
+            
+            # UI에서 마스크 사용을 해제했거나, 전달된 마스크가 완전히 비어있을 경우 None으로 덮어씀
+            post_mask = kwargs.get("mask")
+            if not kwargs.get("use_mask") or post_mask is None:
+                post_mask = None
+            elif isinstance(post_mask, np.ndarray) and post_mask.max() == 0:
+                post_mask = None
             
             return self.diffusion_estimator.manual_post_process(
                 gen_pil, kwargs.get("image"), post_mask, upscale_opts=kwargs.get("upscale_opts")
             )
+            
         return None
 
     def on_model_combo_changed(self, index=None):
+        """ 콤보박스 모델 변경 핸들러
+            - 선택된 모델의 옵션을 파싱하여 Multi-Angle 및 Multi-Image UI의 활성화 상태를 제어합니다.
+        """
         model_key = self.combo_model.currentData()
         if not model_key: return
         model_config = self.generation_models_dict.get(model_key, {})
         self._active_model_config = model_config
         
-        options = [x.strip().lower() for x in model_config.get("options", [])]
+        flags, opt_kv = self._parse_options(model_config)
         
         # Multi-Angle 체크
-        has_multi_angle = "multi-angle" in options or "multi_angle" in options
+        has_multi_angle = "multi-angle" in flags or "multi_angle" in flags
         self.chk_multi_angle.setEnabled(has_multi_angle)
         self.chk_multi_angle.setChecked(has_multi_angle)
         
         # Multi-Image 체크 (Qwen)
-        has_multi_image = "multi-image" in options
+        has_multi_image = "multi-image" in flags
         self.multi_image_group.setVisible(has_multi_image)
         
         # 이미지 필수 여부
@@ -2254,9 +2287,8 @@ class BgComposerApp(QMainWindow):
             raise RuntimeError(str(e))
 
     def call_fal_ai_api(self, *, model_id, pil_images, prompt, num_inference_steps, guidance_scale, seed=None, token, use_queue=True, **kwargs):
-        """Fal-AI API 호출: 큐(Queue) 방식 추론에 맞춘 상태 폴링(Polling) 로직 수정 적용
-            - 400 에러(Request is still in progress) 방지를 위해 response_url 대신 status_url을 먼저 폴링하여 작업 완료를 대기하도록 개선.
-            - 422 에러(At least one input image) 방지를 위해 pil_images 존재 여부에 따라 payload 동적 구성.
+        """ Fal-AI API 호출 
+            - 큐(Queue) 방식 추론에 맞춘 상태 폴링(Polling) 로직 수행 및 Qwen 전용 파라미터(true_cfg_scale 등) 처리
         """
         if not token:
             raise RuntimeError("Fal-AI API Key가 누락되었습니다. 설정에서 API 키를 확인해주세요.")
@@ -2289,8 +2321,21 @@ class BgComposerApp(QMainWindow):
             "seed": seed if seed is not None else random.randint(0, 2**32 - 1),
         }
 
-        # 수정사항: pil_images에 실제 이미지가 있을 때만 image_urls 필드 추가 (빈 배열 전송 방지)
+        # Qwen-Edit 전용 파라미터(true_cfg_scale 등)를 options에서 가져와 API로 전달
+        if model_cfg:
+            _, opt_kv = self._parse_options(model_cfg)
+            if "true_cfg_scale" in opt_kv:
+                payload["true_cfg_scale"] = float(opt_kv["true_cfg_scale"])
+                
+            if "lora" in (api_url or "").lower():
+                lora_path  = opt_kv.get("lora_path", "")
+                lora_scale = float(opt_kv.get("lora_scale", 0.9))
+                if lora_path:
+                    payload["loras"] = [{"path": lora_path, "scale": lora_scale}]
+
+        # 수정사항: pil_images에 실제 이미지가 있을 때만 image_url(s) 필드 추가 (빈 배열 전송 방지)
         if pil_images:
+            payload["image_url"] = encode_to_b64_dataurl(pil_images[0])
             payload["image_urls"] = [encode_to_b64_dataurl(img) for img in pil_images]
 
         headers = {

@@ -357,7 +357,10 @@ class DiffusionEstimator:
             return None
 
     def manual_post_process(self, gen_img: Image.Image, original: np.ndarray, mask: np.ndarray, upscale_opts: dict = None) -> np.ndarray:
-        """ 공통 후처리: Upscale & Composite """
+        """ 공통 후처리: Upscale & Composite 
+            - 마스크가 존재하고 텅 빈 마스크(전체 검정)가 아닐 때만 원본과 합성하여, 
+              AI 생성 이미지가 원본으로 잘못 덮어씌워지는 현상을 완벽히 차단함
+        """
         if gen_img is None: return None
         
         org_h, org_w = None, None
@@ -378,14 +381,15 @@ class DiffusionEstimator:
             if upscale_opts.get("resize_back", True):
                 final_img = final_img.resize(target_size, Image.LANCZOS)
         
-        # Composite (마스크 영역만 합성)
-        if original is not None and mask is not None and mask.mean() < 250:
-            try:
-                w, h = final_img.size
-                orig_pil = self._smart_resize_image(Image.fromarray(original).convert("RGB"), w, h)
-                mask_pil = self._smart_resize_image(Image.fromarray(mask).convert("L"), w, h, Image.NEAREST)
-                final_img = Image.composite(final_img, orig_pil, mask_pil)
-            except: pass
+        # Composite (마스크 영역만 합성), 보완: 마스크가 확실히 주어졌고, 전체 검정(0)이 아닌 경우에만 합성 로직 실행
+        if original is not None and mask is not None:
+            if mask.max() > 0 and mask.mean() < 250:
+                try:
+                    w, h = final_img.size
+                    orig_pil = self._smart_resize_image(Image.fromarray(original).convert("RGB"), w, h)
+                    mask_pil = self._smart_resize_image(Image.fromarray(mask).convert("L"), w, h, Image.NEAREST)
+                    final_img = Image.composite(final_img, orig_pil, mask_pil)
+                except: pass
                 
         # 원본 크기 복구
         if org_w and org_h and final_img.size != (org_w, org_h):
