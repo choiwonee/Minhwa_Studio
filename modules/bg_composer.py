@@ -1674,7 +1674,7 @@ class BgComposerApp(QMainWindow):
             self.txt_trans_result.setPlainText("Failed.")
             return
             
-        if self.chk_use_rag.isChecked() and isinstance(res, dict):
+        if isinstance(res, dict):
             # RAG 데이터 캐싱 (Generate 시 활용)
             self._cached_rag_data = res
 
