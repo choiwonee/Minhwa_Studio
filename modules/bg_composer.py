@@ -2086,8 +2086,29 @@ class BgComposerApp(QMainWindow):
         # --- (추가) 안전 필터(NSFW) 및 특수 에러의 우아한 처리 ---
         err_lower = str(err_msg).lower()
         
+        # 1. Gemini 정책 차단 (API 권한/안전 필터 분리)
+        if "gemini_policy_violation" in err_lower:
+            reason = err_msg.split("사유:")[-1].strip().replace(")", "").strip() if "사유:" in err_msg else "UNKNOWN"
+            if "SAFETY" in reason or "IMAGE_SAFETY" in reason:
+                QMessageBox.warning(
+                    self,
+                    "⚠️ 안전 필터 감지",
+                    "입력하신 프롬프트나 이미지가 AI 안전 정책에 의해 차단되었습니다.\n내용을 수정하신 후 다시 시도해주세요."
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "🚫 Gemini 이미지 생성 권한 없음",
+                    f"이미지 생성이 차단되었습니다. (사유: {reason})\n\n"
+                    "프롬프트 내용과 무관한 API 권한 문제입니다.\n\n"
+                    "다음을 확인해주세요:\n"
+                    "  • Google AI Studio에서 유료 플랜(Paid Tier) 전환 여부\n"
+                    "  • Imagen API 사용 권한 활성화 여부\n"
+                    "  • 유효한 API Key 입력 여부 (상단 [API Key] 버튼)"
+                )
+
         # 1. 안전 필터(NSFW) / 비윤리적 콘텐츠 차단 감지
-        if any(kw in err_lower for kw in ["safety", "nsfw", "policy", "blocked", "content is not allowed", "inappropriate", "violation"]):
+        if any(kw in err_lower for kw in ["safety", "nsfw", "policy", "blocked", "content is not allowed", "inappropriate"]):
             QMessageBox.warning(
                 self, 
                 "⚠️ 안전 필터 감지", 

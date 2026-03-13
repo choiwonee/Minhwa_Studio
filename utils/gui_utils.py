@@ -557,6 +557,7 @@ class ProcessingOverlay(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         self.setHidden(True)
+        self.setStyleSheet("border: none; background: transparent;")
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
         self.card = QFrame()
