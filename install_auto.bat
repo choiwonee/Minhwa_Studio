@@ -33,8 +33,40 @@ REM ============================================================================
 :STEP_VENV
 echo.
 echo ### [1/6] Setting up Virtual Environment ###
+set "PYCMD="
+
+REM --- 1) Try Python 3.11 via the "py" launcher (works even if other versions are also installed) ---
+py -3.11 --version > nul 2>&1
+if %errorlevel% equ 0 set "PYCMD=py -3.11"
+if not "%PYCMD%"=="" goto FOUND_PYTHON
+
+REM --- 2) Fallback: check if the default "python" command is already 3.11.x ---
+for /f "tokens=2" %%v in ('python --version 2^>^&1') do set "PYVER=%%v"
+echo %PYVER% | findstr /r "^3\.11\." > nul
+if %errorlevel% equ 0 set "PYCMD=python"
+if not "%PYCMD%"=="" goto FOUND_PYTHON
+
+goto ERROR_PYTHON_VERSION
+
+:ERROR_PYTHON_VERSION
+echo.
+echo [ERROR] Python 3.11.x was not found on this system.
+echo         This project requires Python 3.11.x (e.g. 3.11.9).
+echo.
+echo         1^) Install Python 3.11.x from https://www.python.org/downloads/
+echo            ^(check "Add python.exe to PATH" during install^)
+echo         2^) If another Python version is already installed, you do NOT
+echo            need to remove it - just install 3.11.x alongside it.
+echo         3^) Run "py -0" to confirm 3.11 appears in the list, then
+echo            re-run this installer.
+echo.
+pause
+exit /b
+
+:FOUND_PYTHON
+echo - Using Python: %PYCMD%
 if exist "venv" rmdir /s /q "venv"
-python -m venv venv
+%PYCMD% -m venv venv
 call venv\Scripts\activate
 python -m pip install --upgrade pip
 goto STEP_HARDWARE
